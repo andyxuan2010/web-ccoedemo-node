@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-label="MSAL flow diagram">
+  <defs>
+    <style>
+      .title { font: 700 36px 'Segoe UI', sans-serif; fill: #0a3c71; }
+      .node { fill: #edf5ff; stroke: #8bb7eb; stroke-width: 2; rx: 16; }
+      .text { font: 600 24px 'Segoe UI', sans-serif; fill: #132238; }
+      .sub { font: 500 18px 'Segoe UI', sans-serif; fill: #40556f; }
+      .arrow { stroke: #2d6fc0; stroke-width: 3; fill: none; marker-end: url(#m); }
+      .label { font: 600 18px 'Segoe UI', sans-serif; fill: #0a3c71; }
+    </style>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2d6fc0"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="58" class="title">MSAL Mode: App-Managed OAuth Flow</text>
+
+  <rect class="node" x="40" y="120" width="300" height="140"/>
+  <text class="text" x="72" y="178">User Browser</text>
+  <text class="sub" x="72" y="212">Clicks “Sign in with MSAL”</text>
+
+  <rect class="node" x="450" y="120" width="300" height="140"/>
+  <text class="text" x="510" y="178">Flask App</text>
+  <text class="sub" x="490" y="212">MSAL builds auth request</text>
+
+  <rect class="node" x="860" y="120" width="300" height="140"/>
+  <text class="text" x="928" y="178">Microsoft Entra ID</text>
+  <text class="sub" x="900" y="212">Auth + token endpoint</text>
+
+  <rect class="node" x="450" y="320" width="300" height="140"/>
+  <text class="text" x="500" y="378">Flask Session</text>
+  <text class="sub" x="475" y="412">Stores token claims in app</text>
+
+  <path class="arrow" d="M340 190 H440"/>
+  <text class="label" x="350" y="176">/login</text>
+
+  <path class="arrow" d="M750 190 H850"/>
+  <text class="label" x="770" y="176">Redirect</text>
+
+  <path class="arrow" d="M1010 260 V300 H600"/>
+  <text class="label" x="760" y="288">/auth/callback with code</text>
+
+  <path class="arrow" d="M600 260 V310"/>
+  <text class="label" x="620" y="300">Acquire token</text>
+
+  <path class="arrow" d="M450 390 H340 V220"/>
+  <text class="label" x="250" y="360">Render profile from app session</text>
+</svg>
