@@ -1,0 +1,1116 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}AAD SSO Demo{% endblock %}</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f6f7fb;
+            --card: rgba(255, 255, 255, 0.44);
+            --text: rgba(19, 34, 56, 0.82);
+            --muted: rgba(44, 65, 92, 0.72);
+            --primary: #0057b8;
+            --primary-dark: #003d82;
+            --border: rgba(135, 156, 183, 0.48);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+            background:
+                linear-gradient(rgba(246, 247, 251, 0.10), rgba(246, 247, 251, 0.16)),
+                url("{{ static_url('img/world-map-cities.svg', cache_token) }}") center/cover no-repeat fixed;
+            color: var(--text);
+        }
+
+        .scroll-progress {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 4px;
+            width: 0%;
+            background: linear-gradient(90deg, #0d6efd, #23a6d5);
+            z-index: 1400;
+            box-shadow: 0 2px 8px rgba(13, 110, 253, 0.35);
+        }
+
+        .flying-plane {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 36px;
+            height: 36px;
+            pointer-events: none;
+            z-index: 1200;
+            opacity: 0.88;
+            filter: drop-shadow(0 6px 12px rgba(11, 93, 184, 0.22));
+            transition: transform 3.2s cubic-bezier(0.33, 1, 0.68, 1);
+            transform-origin: center center;
+        }
+
+        .plane-trail-layer {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 1190;
+        }
+
+        .firework-layer {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 1250;
+            overflow: hidden;
+        }
+
+        .plane-trail-dot {
+            position: fixed;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(255, 255, 255, 0.75) 0%, rgba(186, 220, 255, 0.3) 70%, rgba(186, 220, 255, 0) 100%);
+            animation: trailFade 1200ms ease-out forwards;
+            pointer-events: none;
+        }
+
+        .firework-spark {
+            position: fixed;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            pointer-events: none;
+            opacity: 0.95;
+            animation: fireworkBurst 980ms ease-out forwards;
+            transform: translate(var(--dx), var(--dy)) scale(0.2);
+            box-shadow: 0 0 16px rgba(255, 255, 255, 0.72);
+        }
+
+        .firework-ring {
+            position: fixed;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            border: 2px solid rgba(255, 255, 255, 0.85);
+            pointer-events: none;
+            opacity: 0.95;
+            animation: fireworkRing 560ms ease-out forwards;
+        }
+
+        .shell {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 86px 20px 64px;
+        }
+
+        .top-nav {
+            position: fixed;
+            top: 14px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            display: flex;
+            gap: 6px;
+            justify-content: center;
+            flex-wrap: wrap;
+            width: min(960px, calc(100vw - 20px));
+        }
+
+        .top-nav .button {
+            backdrop-filter: blur(8px);
+            background: rgba(255, 255, 255, 0.40);
+            box-shadow: 0 6px 18px rgba(19, 34, 56, 0.08);
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+            align-items: start;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 32px;
+            box-shadow: 0 20px 40px rgba(19, 34, 56, 0.08);
+            backdrop-filter: blur(2px);
+            animation: revealUp 520ms ease both;
+        }
+
+        .card h1 {
+            font-size: clamp(1.8rem, 2.5vw, 2.6rem);
+            letter-spacing: 0.2px;
+        }
+
+        h1, h2 {
+            margin-top: 0;
+        }
+
+        p {
+            color: var(--muted);
+            line-height: 1.6;
+            margin: 0.35rem 0;
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 24px;
+        }
+
+        .button {
+            display: inline-block;
+            padding: 12px 18px;
+            border-radius: 999px;
+            text-decoration: none;
+            font-weight: 600;
+            border: 1px solid transparent;
+            transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+        }
+
+        .button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 8px 20px rgba(19, 34, 56, 0.12);
+        }
+
+        .button.primary {
+            background: var(--primary);
+            color: #fff;
+        }
+
+        .button.primary:hover {
+            background: var(--primary-dark);
+        }
+
+        .button.secondary {
+            border-color: var(--border);
+            color: rgba(19, 34, 56, 0.85);
+        }
+
+        .button.disabled {
+            opacity: 0.45;
+            pointer-events: none;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        dl {
+            display: grid;
+            grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+            gap: 10px 16px;
+        }
+
+        dt {
+            font-weight: 700;
+        }
+
+        dd {
+            margin: 0;
+            min-width: 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        code {
+            background: #eef2f8;
+            padding: 2px 6px;
+            border-radius: 6px;
+        }
+
+        .auth-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin: 0 0 14px 0;
+            padding: 4px 7px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(244, 247, 252, 0.52);
+            color: var(--text);
+            font-size: 0.9rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .auth-badge.active {
+            background: #e8f6ec;
+            border-color: #93d3a5;
+            box-shadow: 0 0 0 3px rgba(52, 168, 83, 0.12);
+            animation: pulseRing 2.5s ease-in-out infinite;
+        }
+
+        .auth-badge .label {
+            color: var(--muted);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .auth-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 10px;
+            flex-wrap: nowrap;
+        }
+
+        .auth-actions {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .button.tiny {
+            padding: 7px 12px;
+            font-size: 0.82rem;
+        }
+
+        .mode-pill {
+            border-radius: 999px;
+            padding: 1px 7px;
+            font-size: 0.8rem;
+            line-height: 1.3;
+            border: 1px solid;
+            white-space: nowrap;
+        }
+
+        .mode-pill.msal {
+            color: #094067;
+            background: #d7ecff;
+            border-color: #92c8f8;
+        }
+
+        .mode-pill.easy-auth {
+            color: #0f5132;
+            background: #daf2e3;
+            border-color: #99d5af;
+        }
+
+        .side-panel {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 22px;
+            box-shadow: 0 20px 40px rgba(19, 34, 56, 0.08);
+            backdrop-filter: blur(2px);
+            animation: revealUp 700ms ease both;
+        }
+
+        .side-panel h2 {
+            margin-bottom: 8px;
+        }
+
+        .side-panel p {
+            margin-top: 0;
+            font-size: 0.95rem;
+        }
+
+        .brand-logo {
+            width: 100%;
+            max-width: 220px;
+            height: auto;
+            display: block;
+            margin-top: 10px;
+            animation: floatY 6s ease-in-out infinite;
+        }
+
+        .live-metrics {
+            margin-top: 14px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(249, 251, 255, 0.45);
+            padding: 10px 12px;
+        }
+
+        .idle-timer {
+            margin-top: 12px;
+            border: 1px solid #ffd7a3;
+            border-radius: 12px;
+            background: rgba(255, 247, 235, 0.56);
+            padding: 10px 12px;
+        }
+
+        .idle-timer .metric-value {
+            color: #9a5600;
+        }
+
+        .metric-label {
+            font-size: 0.75rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .metric-value {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--primary-dark);
+            margin-top: 2px;
+        }
+
+        details.health-panel,
+        details.timeline-panel {
+            margin-top: 12px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(249, 251, 255, 0.38);
+            padding: 10px 12px;
+        }
+
+        details.health-panel summary,
+        details.timeline-panel summary {
+            font-size: 0.92rem;
+            color: var(--primary-dark);
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            font-weight: 700;
+            cursor: pointer;
+            margin: 0;
+        }
+
+        .panel-body {
+            margin-top: 8px;
+        }
+
+        .health-list,
+        .timeline-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: grid;
+            gap: 7px;
+        }
+
+        .health-row {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            gap: 8px;
+            align-items: center;
+            font-size: 0.84rem;
+        }
+
+        .status-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: #d9534f;
+            box-shadow: 0 0 0 2px rgba(217, 83, 79, 0.16);
+        }
+
+        .status-dot.ok {
+            background: #34a853;
+            box-shadow: 0 0 0 2px rgba(52, 168, 83, 0.16);
+        }
+
+        .health-row strong,
+        .timeline-event {
+            color: rgba(19, 34, 56, 0.9);
+        }
+
+        .health-value,
+        .timeline-at {
+            color: var(--muted);
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .timeline-item {
+            border-left: 2px solid rgba(0, 87, 184, 0.28);
+            padding-left: 8px;
+        }
+
+        .timeline-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+            font-size: 0.76rem;
+            margin-top: 2px;
+        }
+
+        .timeline-mode {
+            border-radius: 999px;
+            border: 1px solid rgba(0, 87, 184, 0.34);
+            color: rgba(0, 87, 184, 0.92);
+            padding: 1px 6px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .health-summary {
+            margin-top: 8px;
+            font-size: 0.82rem;
+            color: var(--muted);
+        }
+
+        .section-kicker {
+            display: inline-block;
+            margin-bottom: 10px;
+            color: var(--primary-dark);
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 0.78rem;
+        }
+
+        .profile-head {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 2px;
+        }
+
+        .profile-head .section-kicker {
+            margin-bottom: 0;
+        }
+
+        .profile-head h1 {
+            margin: 0;
+            line-height: 1.05;
+        }
+
+        .mode-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(220px, 1fr));
+            gap: 14px;
+            margin-top: 16px;
+        }
+
+        .mode-card {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: rgba(249, 251, 255, 0.42);
+            padding: 14px;
+            transition: transform 160ms ease, box-shadow 160ms ease;
+        }
+
+        .mode-card-link {
+            display: block;
+            color: inherit;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .mode-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 24px rgba(19, 34, 56, 0.12);
+        }
+
+        .mode-card.msal {
+            background: rgba(237, 245, 255, 0.48);
+            border-color: #c6ddff;
+        }
+
+        .mode-card.easy-auth {
+            background: rgba(237, 249, 240, 0.48);
+            border-color: #c1e6c9;
+        }
+
+        .mode-card h3 {
+            margin: 0 0 6px 0;
+            font-size: 1rem;
+        }
+
+        .mode-card p {
+            margin: 0;
+            font-size: 0.95rem;
+        }
+
+        .mode-diagram {
+            margin-top: 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(19, 34, 56, 0.12);
+            overflow: hidden;
+            background: #fff;
+        }
+
+        .mode-diagram img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .meta-list {
+            margin: 18px 0 0;
+            padding: 0;
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(180px, 1fr));
+            gap: 10px;
+        }
+
+        .meta-list li {
+            border: 1px solid var(--border);
+            background: rgba(249, 251, 255, 0.42);
+            border-radius: 10px;
+            padding: 8px 10px;
+            font-size: 0.9rem;
+        }
+
+        .runtime-list {
+            grid-template-columns: 1fr;
+            margin-top: 12px;
+        }
+
+        .meta-list strong {
+            display: block;
+            font-size: 0.75rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 2px;
+        }
+
+        details.claims {
+            margin-top: 20px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(249, 251, 255, 0.40);
+            padding: 10px 12px;
+        }
+
+        details.claims summary {
+            cursor: pointer;
+            font-weight: 700;
+            color: var(--primary-dark);
+        }
+
+        .identity-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 10px 0 14px 0;
+        }
+
+        .info-badge {
+            display: inline-flex;
+            border-radius: 999px;
+            padding: 3px 10px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            border: 1px solid;
+        }
+
+        .tenant-badge {
+            color: #0d4f8b;
+            border-color: #84b7ea;
+            background: rgba(206, 228, 252, 0.62);
+        }
+
+        .role-badge {
+            color: #114f2e;
+            border-color: #8fcca8;
+            background: rgba(214, 244, 225, 0.62);
+        }
+
+        .claims-filter-input {
+            width: 100%;
+            margin: 10px 0 12px 0;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 9px 11px;
+            font-size: 0.92rem;
+            background: rgba(255, 255, 255, 0.72);
+            color: rgba(19, 34, 56, 0.95);
+        }
+
+        .claim-key {
+            margin-top: 3px;
+        }
+
+        .claim-value {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .claim-text {
+            min-width: 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            line-height: 1.4;
+        }
+
+        .claim-copy-button {
+            flex: 0 0 auto;
+        }
+
+        .auth-type-alert {
+            color: #c4161c;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            animation: authAlertPulse 1.1s ease-in-out infinite;
+        }
+
+        @keyframes revealUp {
+            from {
+                opacity: 0;
+                transform: translateY(12px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes floatY {
+            0%,
+            100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-6px);
+            }
+        }
+
+        @keyframes pulseRing {
+            0%,
+            100% {
+                box-shadow: 0 0 0 3px rgba(52, 168, 83, 0.12);
+            }
+            50% {
+                box-shadow: 0 0 0 6px rgba(52, 168, 83, 0.2);
+            }
+        }
+
+        @keyframes trailFade {
+            from {
+                opacity: 0.8;
+                transform: scale(1);
+            }
+            to {
+                opacity: 0;
+                transform: scale(0.2);
+            }
+        }
+
+        @keyframes authAlertPulse {
+            0%,
+            100% {
+                opacity: 1;
+                text-shadow: 0 0 0 rgba(196, 22, 28, 0);
+            }
+            50% {
+                opacity: 0.6;
+                text-shadow: 0 0 8px rgba(196, 22, 28, 0.55);
+            }
+        }
+
+        @keyframes fireworkBurst {
+            0% {
+                opacity: 0.95;
+                transform: translate(0, 0) scale(0.2);
+            }
+            100% {
+                opacity: 0;
+                transform: translate(var(--dx), var(--dy)) scale(1.2);
+            }
+        }
+
+        @keyframes fireworkRing {
+            0% {
+                opacity: 0.92;
+                transform: scale(0.2);
+            }
+            100% {
+                opacity: 0;
+                transform: scale(7.8);
+            }
+        }
+
+        @media (max-width: 900px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+
+            .mode-grid,
+            .meta-list {
+                grid-template-columns: 1fr;
+            }
+
+            .shell {
+                padding-top: 120px;
+            }
+
+            .profile-head {
+                flex-direction: column;
+                gap: 2px;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="scroll-progress" id="scrollProgress"></div>
+    <div class="plane-trail-layer" id="planeTrailLayer"></div>
+    <div class="firework-layer" id="fireworkLayer"></div>
+    <img class="flying-plane" id="flyingPlane" src="{{ static_url('img/logo.svg', cache_token) }}" alt="">
+    <main class="shell">
+        <div class="top-nav">
+            <a class="button secondary" href="{{ path_for('index') }}">Home</a>
+            <button class="button secondary" type="button" onclick="refreshLatest()">Refresh Latest</button>
+            {% if is_signed_in %}
+            <a class="button secondary" href="{{ app_service_portal_url }}" target="_blank" rel="noopener noreferrer">App Service</a>
+            <a class="button secondary" href="{{ app_registration_portal_url }}" target="_blank" rel="noopener noreferrer">App Registration</a>
+            {% else %}
+            <a class="button secondary disabled" href="#" aria-disabled="true" tabindex="-1">App Service</a>
+            <a class="button secondary disabled" href="#" aria-disabled="true" tabindex="-1">App Registration</a>
+            {% endif %}
+        </div>
+        <div class="layout">
+            <section class="card">
+                {% block content %}{% endblock %}
+            </section>
+
+            <aside class="side-panel">
+                {% if active_auth_modes %}
+                <div class="auth-row">
+                    <div class="auth-badge active">
+                        <span class="label">Active auth:</span>
+                        {% for mode in active_auth_modes %}
+                        <span class="mode-pill {{ mode|lower|replace(' ', '-') }}">{{ mode }}</span>
+                        {% endfor %}
+                    </div>
+                    <div class="auth-actions">
+                        {% if 'MSAL' in active_auth_modes %}
+                        <a class="button primary tiny" href="{{ path_for('logout_msal') }}">Sign out</a>
+                        {% endif %}
+                        {% if 'Easy Auth' in active_auth_modes %}
+                        <a class="button primary tiny" href="{{ path_for('logout_easyauth') }}">Sign out</a>
+                        {% endif %}
+                    </div>
+                </div>
+                {% else %}
+                <div class="auth-badge">
+                    <span class="label">Active auth:</span>
+                    <span class="mode-pill">Not signed in</span>
+                </div>
+                {% endif %}
+                <h2>Identity Demo</h2>
+                <p>Demo branding panel for identity mode validation</p>
+                <img class="brand-logo" src="{{ static_url('img/logo.svg', cache_token) }}" alt="Demo logo">
+                <div class="live-metrics">
+                    <div class="metric-label">Local Time</div>
+                    <div class="metric-value" id="liveClock">--:--:--</div>
+                    <div class="metric-label" style="margin-top: 8px;">Date</div>
+                    <div class="metric-value" id="liveDate">---</div>
+                </div>
+                {% if runtime_info %}
+                <div class="panel-body">
+                    <ul class="meta-list runtime-list">
+                        {% for item in runtime_info %}
+                        <li>
+                            <strong>{{ item.label }}:</strong>
+                            <span>{{ item.value }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+                {% if active_auth_modes %}
+                <div class="idle-timer">
+                    <div class="metric-label">Auto Sign-out</div>
+                    <div class="metric-value" id="idleCountdown">05:00</div>
+                </div>
+                {% endif %}
+                <details class="health-panel">
+                    <summary>Auth Health</summary>
+                    <div class="panel-body">
+                        <ul class="health-list">
+                            {% for item in auth_health %}
+                            <li class="health-row">
+                                <span class="status-dot {% if item.ok %}ok{% endif %}" aria-hidden="true"></span>
+                                <span>
+                                    <strong>{{ item.name }}</strong>
+                                    <span class="health-value"> - {{ item.value }}</span>
+                                </span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        <div class="health-summary">
+                            {% if auth_health_ready %}
+                            Core auth configuration is ready.
+                            {% else %}
+                            At least one auth setting still needs attention.
+                            {% endif %}
+                        </div>
+                    </div>
+                </details>
+                <details class="timeline-panel">
+                    <summary>Session Timeline</summary>
+                    <div class="panel-body">
+                        {% if session_timeline %}
+                        <ul class="timeline-list">
+                            {% for event in session_timeline %}
+                            <li class="timeline-item">
+                                <div class="timeline-event">{{ event.event }}</div>
+                                <div class="timeline-meta">
+                                    {% if event.mode %}
+                                    <span class="timeline-mode">{{ event.mode }}</span>
+                                    {% endif %}
+                                    <span class="timeline-at">{{ event.at }}</span>
+                                </div>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <p>No session events yet.</p>
+                        {% endif %}
+                    </div>
+                </details>
+            </aside>
+        </div>
+    </main>
+    <script>
+        (function () {
+            const progress = document.getElementById("scrollProgress");
+            const clock = document.getElementById("liveClock");
+            const date = document.getElementById("liveDate");
+            const plane = document.getElementById("flyingPlane");
+            const planeTrailLayer = document.getElementById("planeTrailLayer");
+            const fireworkLayer = document.getElementById("fireworkLayer");
+            const idleCountdown = document.getElementById("idleCountdown");
+            const idleLimitMs = 5 * 60 * 1000;
+            let idleDeadline = Date.now() + idleLimitMs;
+
+            function updateProgress() {
+                const top = document.documentElement.scrollTop || document.body.scrollTop;
+                const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+                const percent = height > 0 ? (top / height) * 100 : 0;
+                progress.style.width = percent + "%";
+            }
+
+            function updateTime() {
+                const now = new Date();
+                clock.textContent = now.toLocaleTimeString();
+                date.textContent = now.toLocaleDateString(undefined, {
+                    weekday: "short",
+                    year: "numeric",
+                    month: "short",
+                    day: "numeric",
+                });
+            }
+
+            updateProgress();
+            updateTime();
+            window.addEventListener("scroll", updateProgress, { passive: true });
+            setInterval(updateTime, 1000);
+
+            if (idleCountdown) {
+                function formatMs(ms) {
+                    const totalSec = Math.max(0, Math.ceil(ms / 1000));
+                    const m = Math.floor(totalSec / 60);
+                    const s = totalSec % 60;
+                    return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+                }
+
+                function resetIdleDeadline() {
+                    idleDeadline = Date.now() + idleLimitMs;
+                }
+
+                function tickIdle() {
+                    const remaining = idleDeadline - Date.now();
+                    idleCountdown.textContent = formatMs(remaining);
+                    if (remaining <= 0) {
+                        window.location.href = "{{ path_for('logout_all') }}";
+                    }
+                }
+
+                ["mousemove", "keydown", "click", "scroll", "touchstart"].forEach(function (evt) {
+                    window.addEventListener(evt, resetIdleDeadline, { passive: true });
+                });
+
+                tickIdle();
+                setInterval(tickIdle, 1000);
+            }
+
+            if (plane) {
+                let x = 20;
+                let y = 120;
+                let mouseX = 20;
+                let mouseY = 120;
+                let mousePauseTimer = null;
+                let pointerPriorityUntil = 0;
+                let headingUx = 1;
+                let headingUy = 0;
+
+                function clamp(val, min, max) {
+                    return Math.max(min, Math.min(max, val));
+                }
+
+                function movePlaneTo(nextX, nextY) {
+                    const dx = nextX - x;
+                    const dy = nextY - y;
+                    const dist = Math.hypot(dx, dy) || 1;
+                    headingUx = dx / dist;
+                    headingUy = dy / dist;
+                    const dir = headingUx >= 0 ? 1 : -1;
+                    // Keep aircraft attitude natural: shallow bank only, no inversion.
+                    const bankDeg = Math.atan2(headingUy, Math.max(0.25, Math.abs(headingUx))) * (180 / Math.PI);
+                    const clampedBankDeg = clamp(bankDeg, -22, 22);
+                    plane.style.transform =
+                        "translate(" + nextX + "px, " + nextY + "px) rotate(" + clampedBankDeg + "deg) scaleX(" + dir + ")";
+                    x = nextX;
+                    y = nextY;
+                }
+
+                function spawnTrailDot() {
+                    if (!planeTrailLayer) {
+                        return;
+                    }
+                    const dot = document.createElement("span");
+                    dot.className = "plane-trail-dot";
+                    const tailX = x + 22 - headingUx * 18;
+                    const tailY = y + 22 - headingUy * 18;
+                    dot.style.left = tailX + "px";
+                    dot.style.top = tailY + "px";
+                    planeTrailLayer.appendChild(dot);
+                    setTimeout(function () {
+                        dot.remove();
+                    }, 1300);
+                }
+
+                function movePlaneRandom() {
+                    const maxX = Math.max(40, window.innerWidth - 80);
+                    const maxY = Math.max(80, window.innerHeight - 100);
+                    const nextX = Math.random() * maxX;
+                    const nextY = Math.random() * maxY;
+                    movePlaneTo(nextX, nextY);
+                }
+
+                function movePlaneToMouse() {
+                    const maxX = Math.max(40, window.innerWidth - 80);
+                    const maxY = Math.max(80, window.innerHeight - 100);
+                    const nextX = clamp(mouseX - 22, 8, maxX);
+                    const nextY = clamp(mouseY - 22, 8, maxY);
+                    movePlaneTo(nextX, nextY);
+                    pointerPriorityUntil = Date.now() + 2600;
+                }
+
+                window.addEventListener("mousemove", function (e) {
+                    mouseX = e.clientX;
+                    mouseY = e.clientY;
+                    if (mousePauseTimer) {
+                        clearTimeout(mousePauseTimer);
+                    }
+                    mousePauseTimer = setTimeout(movePlaneToMouse, 1000);
+                }, { passive: true });
+
+                movePlaneRandom();
+                setInterval(function () {
+                    if (Date.now() > pointerPriorityUntil) {
+                        movePlaneRandom();
+                    }
+                }, 3400);
+                setInterval(spawnTrailDot, 180);
+            }
+
+            if (fireworkLayer) {
+                const palette = ["#3dd5f3", "#7ee081", "#ffd166", "#ff6f91", "#8d7dff", "#ff9f1c"];
+
+                function spawnFirework(clientX, clientY) {
+                    const ring = document.createElement("span");
+                    ring.className = "firework-ring";
+                    ring.style.left = (clientX - 7) + "px";
+                    ring.style.top = (clientY - 7) + "px";
+                    fireworkLayer.appendChild(ring);
+                    setTimeout(function () {
+                        ring.remove();
+                    }, 620);
+
+                    const sparks = 24;
+                    for (let i = 0; i < sparks; i += 1) {
+                        const spark = document.createElement("span");
+                        spark.className = "firework-spark";
+                        const angle = (Math.PI * 2 * i) / sparks;
+                        const distance = 40 + Math.random() * 88;
+                        spark.style.left = (clientX - 6) + "px";
+                        spark.style.top = (clientY - 6) + "px";
+                        spark.style.setProperty("--dx", Math.cos(angle) * distance + "px");
+                        spark.style.setProperty("--dy", Math.sin(angle) * distance + "px");
+                        spark.style.background = palette[Math.floor(Math.random() * palette.length)];
+                        fireworkLayer.appendChild(spark);
+                        setTimeout(function () {
+                            spark.remove();
+                        }, 1040);
+                    }
+                }
+
+                window.addEventListener("click", function (e) {
+                    if (e.button !== 0) {
+                        return;
+                    }
+                    spawnFirework(e.clientX, e.clientY);
+                }, { passive: true });
+            }
+
+            const claimsFilterInput = document.getElementById("claimsFilterInput");
+            const claimsList = document.getElementById("claimsList");
+            if (claimsFilterInput && claimsList) {
+                const claimKeys = claimsList.querySelectorAll("dt.claim-key");
+                claimsFilterInput.addEventListener("input", function () {
+                    const needle = claimsFilterInput.value.trim().toLowerCase();
+                    claimKeys.forEach(function (dt) {
+                        const dd = dt.nextElementSibling;
+                        if (!dd) {
+                            return;
+                        }
+                        const keyText = dt.textContent.toLowerCase();
+                        const valueNode = dd.querySelector(".claim-text");
+                        const valueText = valueNode ? valueNode.textContent.toLowerCase() : "";
+                        const matched = !needle || keyText.includes(needle) || valueText.includes(needle);
+                        dt.style.display = matched ? "" : "none";
+                        dd.style.display = matched ? "flex" : "none";
+                    });
+                });
+            }
+
+            document.addEventListener("click", function (e) {
+                const copyBtn = e.target.closest(".claim-copy-button");
+                if (!copyBtn) {
+                    return;
+                }
+                const text = copyBtn.getAttribute("data-claim-value") || "";
+                if (!navigator.clipboard) {
+                    return;
+                }
+                navigator.clipboard.writeText(text).then(function () {
+                    const previous = copyBtn.textContent;
+                    copyBtn.textContent = "Copied";
+                    setTimeout(function () {
+                        copyBtn.textContent = previous;
+                    }, 1000);
+                });
+            });
+        })();
+
+        async function refreshLatest() {
+            if ("caches" in window) {
+                try {
+                    const keys = await caches.keys();
+                    await Promise.all(keys.map((k) => caches.delete(k)));
+                } catch (e) {
+                    console.warn("Cache clear skipped:", e);
+                }
+            }
+            const u = new URL(window.location.href);
+            u.searchParams.set("cb", Date.now().toString());
+            window.location.href = u.toString();
+        }
+    </script>
+</body>
+</html>

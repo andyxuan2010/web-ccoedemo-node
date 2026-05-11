@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.log*
+# Environment variables file
+
+# Repository setup script (environment-specific)
+
+# repo-setup gitignore managed start
+# Local workspace files
+.env
+.vscode/
+.vscode/load-dotenv.ps1
+post-checkout.ps1
+repo-setup.ps1
+# repo-setup gitignore managed end
