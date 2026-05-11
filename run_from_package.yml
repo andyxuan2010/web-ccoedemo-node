@@ -1,0 +1,261 @@
+trigger:
+  branches:
+    include:
+      #- main
+      - none
+
+
+pr:
+  branches:
+    include:
+      #- main
+      - none
+
+
+resources:
+  repositories:
+    - repository: tf_tpl
+      type: git
+      name: IaC/template
+      ref: refs/heads/main
+
+pool:
+  name: "IaCRunner"
+  demands:
+    - Agent.OS -equals Linux
+
+variables:
+  - name: env
+    ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+      value: "prod"
+    ${{ if eq(variables['Build.SourceBranchName'], 'dev') }}:
+      value: "dev"
+    ${{ if eq(variables['Build.SourceBranchName'], 'sbx') }}:
+      value: "sbx"
+  - name: subscription
+    ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+      value: "prod"
+    ${{ if eq(variables['Build.SourceBranchName'], 'dev') }}:
+      value: "nonprod"
+    ${{ if eq(variables['Build.SourceBranchName'], 'sbx') }}:
+      value: "sbx"
+  - name: azureServiceConnection
+    value: "sc-ccoe-iac-devops-${{ variables.subscription }}"
+  - name: webAppNamePrimary
+    value: "web-platform-eus-dev-node"
+  - name: webAppNameSecondary
+    value: ""
+  - name: webAppNameThird
+    value: ""
+  - name: packagePath
+    value: "$(Build.ArtifactStagingDirectory)/app.zip"
+  - name: packageRoot
+    value: "$(Build.ArtifactStagingDirectory)/package"
+  - name: nodeVersion
+    value: "24.x"
+  - name: windowsNodeVersion
+    value: "~24"
+  - name: linuxNodeRuntimeStack
+    value: "NODE|24-lts"
+
+stages:
+  - stage: Build
+    displayName: Build
+    jobs:
+      - job: Build
+        displayName: Build self-contained package
+        steps:
+          - template: templates/shared-runner-hygiene.yml@tf_tpl
+            parameters:
+              configureNodeCache: true
+              runPostJobCleanup: false
+
+          - checkout: self
+            clean: true
+            persistCredentials: false
+
+          - task: UseNode@1
+            displayName: Use Node 24
+            inputs:
+              version: "$(nodeVersion)"
+
+          - script: |
+              set -euo pipefail
+              npm ci
+            displayName: Install dependencies
+
+          - script: |
+              set -euo pipefail
+              node --check app.js
+            displayName: Validate app syntax
+
+          - script: |
+              set -euo pipefail
+
+              PACKAGE_ROOT="$(packageRoot)"
+
+              rm -rf "${PACKAGE_ROOT}"
+              mkdir -p "${PACKAGE_ROOT}"
+
+              cp app.js "${PACKAGE_ROOT}/"
+              cp package.json "${PACKAGE_ROOT}/"
+              cp package-lock.json "${PACKAGE_ROOT}/"
+              cp web.config "${PACKAGE_ROOT}/"
+              cp -R views "${PACKAGE_ROOT}/views"
+              cp -R static "${PACKAGE_ROOT}/static"
+              cp -R node_modules "${PACKAGE_ROOT}/node_modules"
+            displayName: Build package contents
+
+          - task: ArchiveFiles@2
+            displayName: Archive application package
+            inputs:
+              rootFolderOrFile: "$(packageRoot)"
+              includeRootFolder: false
+              archiveType: zip
+              archiveFile: "$(packagePath)"
+              replaceExistingArchive: true
+
+          - publish: "$(packagePath)"
+            displayName: Publish artifact
+            artifact: drop
+
+          - template: templates/shared-runner-hygiene.yml@tf_tpl
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false
+
+  - stage: Deploy
+    displayName: Deploy
+    dependsOn: Build
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - job: Deploy
+        displayName: Deploy to Azure App Service
+        steps:
+          - template: templates/shared-runner-hygiene.yml@tf_tpl
+            parameters:
+              runPostJobCleanup: false
+
+          - download: current
+            displayName: Download artifact
+            artifact: drop
+
+          - task: AzureCLI@2
+            displayName: Deploy package-mounted web apps
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                packagePath="$(Pipeline.Workspace)/drop/app.zip"
+
+                test_scm_connectivity() {
+                  local host_name="$1"
+
+                  echo "Starting SCM connectivity preflight for ${host_name}..."
+
+                  if getent ahosts "${host_name}" > /tmp/scm_dns.txt 2>/tmp/scm_dns_err.txt; then
+                    awk '!seen[$1 FS $2]++ { printf("SCM resolved address [%s]: %s\n", $2, $1) }' /tmp/scm_dns.txt
+                  else
+                    cat /tmp/scm_dns_err.txt || true
+                    if command -v nslookup >/dev/null 2>&1; then
+                      nslookup "${host_name}" || true
+                    fi
+                    echo "Failed to resolve ${host_name} from the build agent." >&2
+                    exit 1
+                  fi
+
+                  echo "SCM TCP probe: testing ${host_name}:443"
+                  if ! timeout 10 bash -c "cat < /dev/null > /dev/tcp/${host_name}/443" 2>/tmp/scm_tcp_err.txt; then
+                    cat /tmp/scm_tcp_err.txt || true
+                    echo "Failed to reach https://${host_name} from the build agent." >&2
+                    exit 1
+                  fi
+                }
+
+                deploy_target() {
+                  local app_name="$1"
+
+                  if [ -z "${app_name}" ]; then
+                    echo "Deployment target is blank. Skipping."
+                    return 0
+                  fi
+
+                  local app_id
+                  local subscription_id
+                  local resource_group
+                  local scm_host
+                  local app_os
+
+                  app_id="$(az resource list --name "${app_name}" --resource-type "Microsoft.Web/sites" --query "[0].id" --output tsv)"
+                  if [ -z "${app_id}" ]; then
+                    echo "App Service '${app_name}' was not found. Skipping deployment."
+                    return 0
+                  fi
+
+                  subscription_id="$(echo "${app_id}" | cut -d/ -f3)"
+                  resource_group="$(echo "${app_id}" | cut -d/ -f5)"
+                  scm_host="${app_name}.scm.azurewebsites.net"
+
+                  echo "Deploying package-mounted app to ${app_name} in ${resource_group}..."
+                  az account set --subscription "${subscription_id}"
+                  test_scm_connectivity "${scm_host}"
+
+                  app_os="$(az webapp show --resource-group "${resource_group}" --name "${app_name}" --query reserved --output tsv | tr '[:upper:]' '[:lower:]')"
+                  echo "Detected reserved value for ${app_name}: ${app_os}"
+
+                  if [ "${app_os}" = "true" ]; then
+                    az webapp config set \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --linux-fx-version "$(linuxNodeRuntimeStack)" \
+                      --startup-file "npm start"
+
+                    az webapp config appsettings delete \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --setting-names WEBSITE_NODE_DEFAULT_VERSION SCM_DO_BUILD_DURING_DEPLOYMENT ENABLE_ORYX_BUILD || true
+                  elif [ "${app_os}" = "false" ]; then
+                    az webapp config appsettings set \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --settings WEBSITE_NODE_DEFAULT_VERSION="$(windowsNodeVersion)"
+
+                    az webapp config appsettings delete \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --setting-names SCM_DO_BUILD_DURING_DEPLOYMENT ENABLE_ORYX_BUILD || true
+                  else
+                    echo "Unexpected reserved value '${app_os}' for '${app_name}'. Continuing with neutral package deployment." >&2
+                  fi
+
+                  az webapp config appsettings set \
+                    --resource-group "${resource_group}" \
+                    --name "${app_name}" \
+                    --settings \
+                      WEBSITE_RUN_FROM_PACKAGE=1 \
+                      APP_SERVICE_NAME="${app_name}" \
+                      APP_SERVICE_SUBSCRIPTION_ID="${subscription_id}" \
+                      APP_SERVICE_RESOURCE_GROUP="${resource_group}"
+
+                  az webapp deploy \
+                    --resource-group "${resource_group}" \
+                    --name "${app_name}" \
+                    --src-path "${packagePath}" \
+                    --type zip \
+                    --restart true \
+                    --track-status false
+                }
+
+                deploy_target "$(webAppNamePrimary)"
+                deploy_target "$(webAppNameSecondary)"
+                deploy_target "$(webAppNameThird)"
+
+          - template: templates/shared-runner-hygiene.yml@tf_tpl
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false
