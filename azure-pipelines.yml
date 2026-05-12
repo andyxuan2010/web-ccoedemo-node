@@ -1,0 +1,230 @@
+name: $(Build.Repository.Name)
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+      - dev
+      - sbx
+
+pr:
+  branches:
+    include:
+      - main
+      - dev
+      - sbx
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: IaC/template
+      ref: refs/heads/main
+
+pool:
+  name: "Azure Pipelines"
+  vmImage: "ubuntu-latest"
+
+variables:
+  - name: env
+    ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+      value: "prod"
+    ${{ if eq(variables['Build.SourceBranchName'], 'dev') }}:
+      value: "dev"
+    ${{ if eq(variables['Build.SourceBranchName'], 'sbx') }}:
+      value: "sbx"
+  - name: webAppNameSecondary
+    value: ""
+  - name: packagePath
+    value: "$(Build.ArtifactStagingDirectory)/app.zip"
+  - name: packageRoot
+    value: "$(Build.ArtifactStagingDirectory)/package"
+  - name: nodeVersion
+    value: "24.x"
+  - name: windowsNodeVersion
+    value: "~24"
+  - name: linuxNodeRuntimeStack
+    value: "NODE|24-lts"
+
+stages:
+  - stage: Build
+    displayName: Build
+    jobs:
+      - job: Build
+        displayName: Build package
+        steps:
+          - template: templates/shared-runner-hygiene.yml@templates
+            parameters:
+              configureNodeCache: true
+              runPostJobCleanup: false
+
+          - checkout: self
+            clean: true
+            persistCredentials: false
+
+          - task: UseNode@1
+            displayName: Use Node 24
+            inputs:
+              version: "$(nodeVersion)"
+
+          - script: |
+              set -euo pipefail
+              npm ci
+            displayName: Install dependencies
+
+          - script: |
+              set -euo pipefail
+              node --check app.js
+            displayName: Validate app syntax
+
+          - script: |
+              set -euo pipefail
+
+              PACKAGE_ROOT="$(packageRoot)"
+
+              rm -rf "${PACKAGE_ROOT}"
+              mkdir -p "${PACKAGE_ROOT}"
+
+              cp app.js "${PACKAGE_ROOT}/"
+              cp package.json "${PACKAGE_ROOT}/"
+              cp package-lock.json "${PACKAGE_ROOT}/"
+              cp web.config "${PACKAGE_ROOT}/"
+              cp -R views "${PACKAGE_ROOT}/views"
+              cp -R static "${PACKAGE_ROOT}/static"
+            displayName: Stage application files
+
+          - task: ArchiveFiles@2
+            displayName: Archive application
+            inputs:
+              rootFolderOrFile: "$(packageRoot)"
+              includeRootFolder: false
+              archiveType: zip
+              archiveFile: "$(packagePath)"
+              replaceExistingArchive: true
+
+          - publish: "$(packagePath)"
+            displayName: Publish artifact
+            artifact: drop
+
+          - template: templates/shared-runner-hygiene.yml@templates
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false
+
+  - stage: CreateGitTag
+    displayName: Create Git Tag
+    dependsOn: Build
+    condition: and(succeeded('Build'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - job: create_git_tag
+        displayName: Create Git Tag
+        steps:
+          - checkout: self
+            clean: true
+            persistCredentials: true
+            fetchDepth: 0
+
+          - bash: |
+              set -euo pipefail
+
+              source_branch="$(Build.SourceBranchName)"
+              source_sha="$(Build.SourceVersion)"
+
+              git fetch --force --tags
+
+              latest_tag="$(git tag --list 'v[1-9]*.[0-9]*.[0-9]*' --sort=-v:refname | sed -n '1p')"
+              if [[ -z "${latest_tag}" ]]; then
+                latest_tag="v1.0.0"
+                previous_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | sed -n '1p')"
+                if [[ -n "${previous_tag}" ]]; then
+                  commit_range="${previous_tag}..${source_sha}"
+                else
+                  commit_range="${source_sha}"
+                fi
+              else
+                commit_range="${latest_tag}..${source_sha}"
+              fi
+
+              commits="$(git log --format=%B ${commit_range})"
+              release_notes="$(git log --max-count=20 --format='- %s (%h)' ${commit_range})"
+              if [[ -z "${release_notes}" ]]; then
+                release_notes="- ${source_sha}"
+              fi
+
+              if grep -Eq '(^|[[:space:]])BREAKING[ -]CHANGE:|^[a-zA-Z][a-zA-Z0-9-]*(\([^)]+\))?!:' <<< "${commits}"; then
+                bump="major"
+              elif grep -Eq '^feat(\([^)]+\))?:' <<< "${commits}"; then
+                bump="minor"
+              elif grep -Eq '^fix(\([^)]+\))?:' <<< "${commits}"; then
+                bump="patch"
+              else
+                echo "No semantic-release prefix found; defaulting to patch bump."
+                bump="patch"
+              fi
+
+              version="${latest_tag#v}"
+              IFS='.' read -r major minor patch <<< "${version}"
+
+              case "${bump}" in
+                major)
+                  major=$((major + 1))
+                  minor=0
+                  patch=0
+                  ;;
+                minor)
+                  minor=$((minor + 1))
+                  patch=0
+                  ;;
+                patch)
+                  patch=$((patch + 1))
+                  ;;
+              esac
+
+              tag_name="v${major}.${minor}.${patch}"
+
+              if git rev-parse -q --verify "refs/tags/${tag_name}" >/dev/null; then
+                echo "Tag ${tag_name} already exists; leaving it unchanged."
+                exit 0
+              fi
+
+              if git ls-remote --exit-code --tags origin "refs/tags/${tag_name}" >/dev/null 2>&1; then
+                echo "Remote already has tag ${tag_name}; leaving it unchanged."
+                exit 0
+              fi
+
+              git config user.name "Azure Pipelines"
+              git config user.email "azure-pipelines@local"
+
+              tag_message="$(mktemp)"
+              {
+                echo "Release ${tag_name} (${bump})"
+                echo
+                echo "Source: ${source_branch}@${source_sha}"
+                echo "Range: ${commit_range}"
+                echo
+                echo "Changes:"
+                printf '%s\n' "${release_notes}"
+              } > "${tag_message}"
+
+              git tag -a "${tag_name}" "${source_sha}" -F "${tag_message}"
+              git push origin "refs/tags/${tag_name}"
+            displayName: Create annotated semantic version tag
+
+  - template: azure-pipelines/deploy-stage.yml
+    parameters:
+      stageName: DeploySandbox
+      displayName: Deploy Sandbox
+      dependsOn: Build
+      azureServiceConnection: sc-platform-sbx
+      webAppNamePrimary: web-platform-cc-sbx-node
+
+  - template: azure-pipelines/deploy-stage.yml
+    parameters:
+      stageName: DeployDev
+      displayName: Deploy Dev
+      #dependsOn: DeploySandbox
+      dependson: Build      
+      azureServiceConnection: sc-platform-dev
+      webAppNamePrimary: web-platform-eus-dev-node
