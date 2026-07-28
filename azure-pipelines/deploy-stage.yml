@@ -1,0 +1,206 @@
+parameters:
+  - name: stageName
+    type: string
+  - name: displayName
+    type: string
+  - name: dependsOn
+    type: string
+  - name: azureServiceConnection
+    type: string
+  - name: webAppNamePrimary
+    type: string
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: ${{ parameters.displayName }}
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - job: Deploy
+        displayName: ${{ parameters.displayName }}
+        variables:
+          webAppNamePrimary: ${{ parameters.webAppNamePrimary }}
+        steps:
+          - template: templates/shared-runner-hygiene.yml@templates
+            parameters:
+              runPostJobCleanup: false
+
+          - task: AzureCLI@2
+            displayName: Check primary deployment target
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $appName = '$(webAppNamePrimary)'.Trim()
+                if ([string]::IsNullOrWhiteSpace($appName)) {
+                  Write-Host "##vso[task.logissue type=warning]webAppNamePrimary is not defined. Skipping deployment."
+                  Write-Host "##vso[task.setvariable variable=skipPrimaryDeployment]true"
+                  exit 0
+                }
+
+                $appId = az resource list --name $appName --resource-type "Microsoft.Web/sites" --query "[0].id" --output tsv
+                if ([string]::IsNullOrWhiteSpace($appId)) {
+                  Write-Host "##vso[task.logissue type=warning]App Service '$appName' was not found. Skipping deployment."
+                  Write-Host "##vso[task.setvariable variable=skipPrimaryDeployment]true"
+                  exit 0
+                }
+
+                Write-Host "App Service '$appName' found."
+                Write-Host "##vso[task.setvariable variable=skipPrimaryDeployment]false"
+                $subscriptionId = ($appId -split '/')[2]
+                $resourceGroup = ($appId -split '/')[4]
+                Write-Host "##vso[task.setvariable variable=primarySubscriptionId]$subscriptionId"
+                Write-Host "##vso[task.setvariable variable=primaryResourceGroup]$resourceGroup"
+
+          - task: AzureCLI@2
+            displayName: Check secondary deployment target
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $appName = '$(webAppNameSecondary)'.Trim()
+                if ([string]::IsNullOrWhiteSpace($appName)) {
+                  Write-Host "##vso[task.logissue type=warning]webAppNameSecondary is not defined. Skipping deployment."
+                  Write-Host "##vso[task.setvariable variable=skipSecondaryDeployment]true"
+                  exit 0
+                }
+
+                $appId = az resource list --name $appName --resource-type "Microsoft.Web/sites" --query "[0].id" --output tsv
+                if ([string]::IsNullOrWhiteSpace($appId)) {
+                  Write-Host "##vso[task.logissue type=warning]App Service '$appName' was not found. Skipping deployment."
+                  Write-Host "##vso[task.setvariable variable=skipSecondaryDeployment]true"
+                  exit 0
+                }
+
+                Write-Host "App Service '$appName' found."
+                Write-Host "##vso[task.setvariable variable=skipSecondaryDeployment]false"
+                $subscriptionId = ($appId -split '/')[2]
+                $resourceGroup = ($appId -split '/')[4]
+                Write-Host "##vso[task.setvariable variable=secondarySubscriptionId]$subscriptionId"
+                Write-Host "##vso[task.setvariable variable=secondaryResourceGroup]$resourceGroup"
+
+          - download: current
+            displayName: Download artifact
+            artifact: drop
+            condition: or(ne(variables['skipPrimaryDeployment'], 'true'), ne(variables['skipSecondaryDeployment'], 'true'))
+
+          - task: AzureCLI@2
+            displayName: Deploy published ZIP packages
+            condition: or(ne(variables['skipPrimaryDeployment'], 'true'), ne(variables['skipSecondaryDeployment'], 'true'))
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                packagePath="$(Pipeline.Workspace)/drop/app.zip"
+
+                test_scm_connectivity() {
+                  local host_name="$1"
+
+                  echo "Starting SCM connectivity preflight for ${host_name}..."
+
+                  if getent ahosts "${host_name}" > /tmp/scm_dns.txt 2>/tmp/scm_dns_err.txt; then
+                    awk '!seen[$1 FS $2]++ { printf("SCM resolved address [%s]: %s\n", $2, $1) }' /tmp/scm_dns.txt
+                  else
+                    cat /tmp/scm_dns_err.txt || true
+                    if command -v nslookup >/dev/null 2>&1; then
+                      nslookup "${host_name}" || true
+                    fi
+                    echo "Failed to resolve ${host_name} from the build agent." >&2
+                    exit 1
+                  fi
+
+                  echo "SCM TCP probe: testing ${host_name}:443"
+                  if ! timeout 10 bash -c "cat < /dev/null > /dev/tcp/${host_name}/443" 2>/tmp/scm_tcp_err.txt; then
+                    cat /tmp/scm_tcp_err.txt || true
+                    echo "Failed to reach https://${host_name} from the build agent." >&2
+                    exit 1
+                  fi
+                }
+
+                deploy_target() {
+                  local app_name="$1"
+                  local resource_group="$2"
+                  local subscription_id="$3"
+
+                  if [ -z "${app_name}" ]; then
+                    echo "Deployment target is blank. Skipping."
+                    return 0
+                  fi
+
+                  if [ -z "${subscription_id}" ] || [ -z "${resource_group}" ]; then
+                    echo "Deployment metadata is incomplete for '${app_name}'. subscriptionId='${subscription_id}' resourceGroup='${resource_group}'" >&2
+                    exit 1
+                  fi
+
+                  local scm_host="${app_name}.scm.azurewebsites.net"
+                  local app_os
+
+                  echo "Deploying ZIP package with build automation to ${app_name}..."
+                  az account set --subscription "${subscription_id}"
+                  test_scm_connectivity "${scm_host}"
+
+                  app_os="$(az webapp show --resource-group "${resource_group}" --name "${app_name}" --query reserved --output tsv | tr '[:upper:]' '[:lower:]')"
+                  echo "Detected reserved value for ${app_name}: ${app_os}"
+
+                  if [ "${app_os}" = "true" ]; then
+                    az webapp config set \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --linux-fx-version "$(linuxNodeRuntimeStack)" \
+                      --startup-file "npm start"
+
+                    az webapp config appsettings delete \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --setting-names WEBSITE_NODE_DEFAULT_VERSION WEBSITE_RUN_FROM_PACKAGE || true
+                  elif [ "${app_os}" = "false" ]; then
+                    az webapp config appsettings delete \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --setting-names WEBSITE_RUN_FROM_PACKAGE || true
+
+                    az webapp config appsettings set \
+                      --resource-group "${resource_group}" \
+                      --name "${app_name}" \
+                      --settings WEBSITE_NODE_DEFAULT_VERSION="$(windowsNodeVersion)"
+                  else
+                    echo "Unexpected reserved value '${app_os}' for '${app_name}'. Continuing with neutral ZIP deployment." >&2
+                  fi
+
+                  az webapp config appsettings set \
+                    --resource-group "${resource_group}" \
+                    --name "${app_name}" \
+                    --settings \
+                      SCM_DO_BUILD_DURING_DEPLOYMENT=true \
+                      ENABLE_ORYX_BUILD=true \
+                      APP_SERVICE_NAME="${app_name}" \
+                      APP_SERVICE_SUBSCRIPTION_ID="${subscription_id}" \
+                      APP_SERVICE_RESOURCE_GROUP="${resource_group}"
+
+                  az webapp deploy \
+                    --resource-group "${resource_group}" \
+                    --name "${app_name}" \
+                    --src-path "${packagePath}" \
+                    --type zip \
+                    --restart true \
+                    --track-status false
+                }
+
+                if [ "$(skipPrimaryDeployment)" != "true" ]; then
+                  deploy_target "$(webAppNamePrimary)" "$(primaryResourceGroup)" "$(primarySubscriptionId)"
+                fi
+
+                if [ "$(skipSecondaryDeployment)" != "true" ]; then
+                  deploy_target "$(webAppNameSecondary)" "$(secondaryResourceGroup)" "$(secondarySubscriptionId)"
+                fi
+
+          - template: templates/shared-runner-hygiene.yml@templates
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-label="Easy Auth flow diagram">
+  <defs>
+    <style>
+      .title { font: 700 36px 'Segoe UI', sans-serif; fill: #0f5132; }
+      .node { fill: #edf9f0; stroke: #9bd8ad; stroke-width: 2; rx: 16; }
+      .text { font: 600 24px 'Segoe UI', sans-serif; fill: #132238; }
+      .sub { font: 500 18px 'Segoe UI', sans-serif; fill: #40556f; }
+      .arrow { stroke: #2f8f4b; stroke-width: 3; fill: none; marker-end: url(#m2); }
+      .label { font: 600 18px 'Segoe UI', sans-serif; fill: #0f5132; }
+    </style>
+    <marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f8f4b"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="58" class="title">Easy Auth Mode: Platform-Managed Authentication</text>
+
+  <rect class="node" x="40" y="120" width="300" height="140"/>
+  <text class="text" x="72" y="178">User Browser</text>
+  <text class="sub" x="72" y="212">Clicks “Sign in with Easy Auth”</text>
+
+  <rect class="node" x="450" y="120" width="300" height="140"/>
+  <text class="text" x="490" y="178">App Service Easy Auth</text>
+  <text class="sub" x="478" y="212">Intercepts auth flow</text>
+
+  <rect class="node" x="860" y="120" width="300" height="140"/>
+  <text class="text" x="928" y="178">Microsoft Entra ID</text>
+  <text class="sub" x="900" y="212">Authenticates user</text>
+
+  <rect class="node" x="450" y="320" width="300" height="140"/>
+  <text class="text" x="488" y="378">Flask App</text>
+  <text class="sub" x="468" y="412">Reads X-MS-CLIENT-PRINCIPAL</text>
+
+  <path class="arrow" d="M340 190 H440"/>
+  <text class="label" x="352" y="176">/.auth/login/aad</text>
+
+  <path class="arrow" d="M750 190 H850"/>
+  <text class="label" x="774" y="176">Provider redirect</text>
+
+  <path class="arrow" d="M1010 260 V300 H600"/>
+  <text class="label" x="730" y="288">/.auth/login/aad/callback</text>
+
+  <path class="arrow" d="M600 260 V310"/>
+  <text class="label" x="625" y="300">Inject headers</text>
+
+  <path class="arrow" d="M450 390 H340 V220"/>
+  <text class="label" x="250" y="360">Render profile from headers</text>
+</svg>
