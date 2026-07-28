@@ -1,0 +1,61 @@
+{% extends "base.njk" %}
+
+{% block title %}Home | AAD SSO Demo{% endblock %}
+
+{% block content %}
+<span class="section-kicker">Identity Demo</span>
+<h1>Node.js demo with MS Entra ID SSO</h1>
+<p>
+    This sample supports two sign-in modes on one site: Flask/MSAL (app-managed) and
+    App Service Easy Auth (platform-managed).
+</p>
+
+<div class="mode-grid">
+    <a class="mode-card mode-card-link msal" href="{{ path_for('login_msal') }}">
+        <h3>MSAL Mode</h3>
+        <p>App handles sign-in and token flow directly in Flask.</p>
+        <div class="mode-diagram">
+            <img src="{{ static_url('img/msal-flow.svg', cache_token) }}" alt="MSAL authentication flow diagram">
+        </div>
+    </a>
+    <a class="mode-card mode-card-link easy-auth" href="{{ path_for('login_easyauth') }}">
+        <h3>Easy Auth Mode</h3>
+        <p>App Service handles sign-in and injects identity headers.</p>
+        <div class="mode-diagram">
+            <img src="{{ static_url('img/easy-auth-flow.svg', cache_token) }}" alt="Easy Auth authentication flow diagram">
+        </div>
+    </a>
+</div>
+
+{% if msal_user %}
+<p>
+    MSAL session active for
+    <strong>{{ msal_user.get("name") or msal_user.get("preferred_username") }}</strong>.
+</p>
+<div class="actions">
+    <a class="button primary" href="{{ path_for('profile_msal') }}">View MSAL profile</a>
+    <a class="button secondary" href="{{ path_for('logout_msal') }}">Sign out (MSAL)</a>
+</div>
+{% endif %}
+
+{% if easy_auth_user %}
+<p>
+    Easy Auth session active for
+    <strong>{{ easy_auth_user.get("name") or easy_auth_user.get("preferred_username") }}</strong>.
+</p>
+<div class="actions">
+    <a class="button primary" href="{{ path_for('profile_easyauth') }}">View Easy Auth profile</a>
+    <a class="button secondary" href="{{ path_for('logout_easyauth') }}">Sign out (Easy Auth)</a>
+</div>
+{% endif %}
+
+{% if not msal_user and not easy_auth_user %}
+<p>
+    Choose an authentication mode to start sign-in.
+</p>
+<div class="actions">
+    <a class="button primary" href="{{ path_for('login_msal') }}">Sign in with MSAL</a>
+    <a class="button secondary" href="{{ path_for('login_easyauth') }}">Sign in with Easy Auth</a>
+</div>
+{% endif %}
+{% endblock %}
