@@ -1,0 +1,672 @@
+name: Build and Deploy Web App
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Run Azure App Service deployment after build
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24.x"
+  WINDOWS_NODE_VERSION: "~24"
+  LINUX_NODE_RUNTIME_STACK: "NODE|24-lts"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PACKAGE_ROOT: ${{ github.workspace }}/package
+  PACKAGE_PATH: ${{ github.workspace }}/app.zip
+  WEBAPP_NAME_SECONDARY: ""
+
+jobs:
+  deployment-precheck:
+    name: Deployment Precheck
+    runs-on: ubuntu-latest
+    environment: ${{ vars.DEPLOY_ENV }}
+    outputs:
+      has_deploy_auth: ${{ steps.check.outputs.has_deploy_auth }}
+      branch_name: ${{ steps.check.outputs.branch_name }}
+    steps:
+      - name: Check deploy authentication inputs
+        id: check
+        shell: bash
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          DEPLOY_ENV: ${{ vars.DEPLOY_ENV }}
+          WEBAPP_NAME_PRIMARY: ${{ vars.WEBAPP_NAME_PRIMARY }}
+        run: |
+          set -euo pipefail
+
+          branch_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+
+          echo "branch_name=${branch_name}" >> "${GITHUB_OUTPUT}"
+
+          missing=()
+          [[ -n "${ARM_CLIENT_ID}" ]] || missing+=("ARM_CLIENT_ID")
+          [[ -n "${ARM_CLIENT_SECRET}" ]] || missing+=("ARM_CLIENT_SECRET")
+          [[ -n "${ARM_TENANT_ID}" ]] || missing+=("ARM_TENANT_ID")
+          [[ -n "${ARM_SUBSCRIPTION_ID}" ]] || missing+=("ARM_SUBSCRIPTION_ID")
+          [[ -n "${DEPLOY_ENV}" ]] || missing+=("DEPLOY_ENV")
+          [[ -n "${WEBAPP_NAME_PRIMARY}" ]] || missing+=("WEBAPP_NAME_PRIMARY")
+
+          if [[ ${#missing[@]} -eq 0 ]]; then
+            echo "has_deploy_auth=true" >> "${GITHUB_OUTPUT}"
+            echo "Deploy auth precheck passed for GitHub environment '${DEPLOY_ENV}'."
+          else
+            echo "has_deploy_auth=false" >> "${GITHUB_OUTPUT}"
+            echo "Missing deployment configuration for '${DEPLOY_ENV:-unset}': ${missing[*]}"
+          fi
+
+  build-package:
+    name: Build Package
+    runs-on: ubuntu-latest
+    outputs:
+      branch_name: ${{ steps.context.outputs.branch_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve branch context
+        id: context
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch_name="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+
+          echo "branch_name=${branch_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Lint, test, and audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check
+
+      - name: Stage application files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "${PACKAGE_ROOT}" "${PACKAGE_PATH}"
+          mkdir -p "${PACKAGE_ROOT}"
+
+          cp app.js "${PACKAGE_ROOT}/"
+          cp package.json "${PACKAGE_ROOT}/"
+          cp package-lock.json "${PACKAGE_ROOT}/"
+          cp web.config "${PACKAGE_ROOT}/"
+          cp -R views "${PACKAGE_ROOT}/views"
+          cp -R static "${PACKAGE_ROOT}/static"
+
+      - name: Archive application
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${PACKAGE_ROOT}"
+          zip -r "${PACKAGE_PATH}" .
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: webapp-package-${{ github.run_id }}
+          path: ${{ env.PACKAGE_PATH }}
+          if-no-files-found: error
+
+  create-git-tag:
+    name: Create Git Tag
+    needs:
+      - build-package
+    if: github.ref == 'refs/heads/main' && needs.build-package.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_tag: ${{ steps.semver.outputs.release_tag }}
+      release_notes: ${{ steps.semver.outputs.release_notes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Create canonical GitHub release tag
+        id: semver
+        env:
+          SOURCE_BRANCH: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          release_tag_file="$(mktemp)"
+          release_notes_file="$(mktemp)"
+
+          bash scripts/create-release-tag.sh \
+            --source-branch "${SOURCE_BRANCH}" \
+            --source-sha "${SOURCE_SHA}" \
+            --release-tag-file "${release_tag_file}" \
+            --release-notes-file "${release_notes_file}"
+
+          {
+            echo "release_tag=$(cat "${release_tag_file}")"
+            echo "release_notes<<EOF"
+            cat "${release_notes_file}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+  pre-publish-check:
+    name: Pre-Publish Check
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish_stage_repo: ${{ steps.check.outputs.should_publish_stage_repo }}
+      should_publish_ado_repo: ${{ steps.check.outputs.should_publish_ado_repo }}
+    steps:
+      - name: Check publish authentication inputs
+        id: check
+        shell: bash
+        env:
+          STAGE_REPO_URL: ${{ vars.STAGE_REPO_URL }}
+          STAGE_REPO_TOKEN: ${{ secrets.STAGE_REPO_TOKEN }}
+          ADO_REPO_URL: ${{ vars.ADO_REPO_URL }}
+          ADO_REPO_PAT: ${{ secrets.ADO_REPO_PAT }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${STAGE_REPO_URL}" || -z "${STAGE_REPO_TOKEN}" ]]; then
+            echo "::warning::Missing stage mirror configuration: STAGE_REPO_URL and/or STAGE_REPO_TOKEN. Stage repo publish will be skipped."
+            echo "should_publish_stage_repo=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "should_publish_stage_repo=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+          if [[ -z "${ADO_REPO_URL}" || -z "${ADO_REPO_PAT}" ]]; then
+            echo "::warning::Missing Azure DevOps mirror configuration: ADO_REPO_URL and/or ADO_REPO_PAT. Azure DevOps publish will be skipped."
+            echo "should_publish_ado_repo=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "should_publish_ado_repo=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  deploy:
+    name: Deploy
+    needs:
+      - deployment-precheck
+      - build-package
+    if: >
+      github.event_name != 'pull_request' &&
+      needs.deployment-precheck.outputs.has_deploy_auth == 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.deploy)
+    runs-on: ubuntu-latest
+    environment: ${{ vars.DEPLOY_ENV }}
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      WEBAPP_NAME_PRIMARY: ${{ vars.WEBAPP_NAME_PRIMARY }}
+      WEBAPP_NAME_SECONDARY: ${{ vars.WEBAPP_NAME_SECONDARY }}
+      SCM_ALLOW_RULE_NAME: github-actions-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Azure login
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az login \
+            --service-principal \
+            --username "${ARM_CLIENT_ID}" \
+            --password "${ARM_CLIENT_SECRET}" \
+            --tenant "${ARM_TENANT_ID}" \
+            --output none
+          az account set --subscription "${ARM_SUBSCRIPTION_ID}"
+
+      - name: Discover runner public IP
+        id: runner_ip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          runner_ip="$(curl --fail --silent --show-error --retry 3 --ipv4 https://api.ipify.org)"
+          python3 - "${runner_ip}" <<'PY'
+          import ipaddress
+          import sys
+
+          address = ipaddress.ip_address(sys.argv[1])
+          if address.version != 4:
+              raise SystemExit(f"Expected an IPv4 address, received: {address}")
+          PY
+
+          echo "Discovered GitHub runner public IP: ${runner_ip}"
+          echo "address=${runner_ip}" >> "${GITHUB_OUTPUT}"
+
+      - name: Temporarily allow runner IP on SCM
+        shell: bash
+        env:
+          RUNNER_IP: ${{ steps.runner_ip.outputs.address }}
+        run: |
+          set -euo pipefail
+
+          allow_scm_access() {
+            local app_name="$1"
+
+            if [ -z "${app_name}" ]; then
+              return 0
+            fi
+
+            local app_id
+            local subscription_id
+            local resource_group
+
+            app_id="$(az resource list --name "${app_name}" --resource-type "Microsoft.Web/sites" --query "[0].id" --output tsv)"
+            if [ -z "${app_id}" ]; then
+              echo "App Service '${app_name}' was not found. Skipping SCM allow rule."
+              return 0
+            fi
+
+            subscription_id="$(echo "${app_id}" | cut -d/ -f3)"
+            resource_group="$(echo "${app_id}" | cut -d/ -f5)"
+            az account set --subscription "${subscription_id}"
+
+            echo "Allowing ${RUNNER_IP}/32 on the SCM site for ${app_name} using rule ${SCM_ALLOW_RULE_NAME}."
+            az webapp config access-restriction add \
+              --resource-group "${resource_group}" \
+              --name "${app_name}" \
+              --rule-name "${SCM_ALLOW_RULE_NAME}" \
+              --action Allow \
+              --ip-address "${RUNNER_IP}/32" \
+              --priority 100 \
+              --scm-site true
+          }
+
+          allow_scm_access "${WEBAPP_NAME_PRIMARY}"
+          allow_scm_access "${WEBAPP_NAME_SECONDARY}"
+
+      - name: Detach conflicting Deployment Center source binding
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          detach_deployment_center() {
+            local app_name="$1"
+
+            if [ -z "${app_name}" ]; then
+              return 0
+            fi
+
+            local app_id
+            local subscription_id
+            local resource_group
+            local source_control_id
+            local repo_url
+            local branch
+
+            app_id="$(az resource list --name "${app_name}" --resource-type "Microsoft.Web/sites" --query "[0].id" --output tsv)"
+            if [ -z "${app_id}" ]; then
+              echo "App Service '${app_name}' was not found. Skipping source-control validation."
+              return 0
+            fi
+
+            subscription_id="$(echo "${app_id}" | cut -d/ -f3)"
+            resource_group="$(echo "${app_id}" | cut -d/ -f5)"
+            source_control_id="${app_id}/sourcecontrols/web"
+            az account set --subscription "${subscription_id}"
+
+            repo_url="$(az resource show \
+              --ids "${source_control_id}" \
+              --api-version 2022-03-01 \
+              --query properties.repoUrl \
+              --output tsv 2>/dev/null || true)"
+
+            if [ -z "${repo_url}" ]; then
+              echo "No Deployment Center source binding is configured for ${app_name}."
+              return 0
+            fi
+
+            branch="$(az resource show \
+              --ids "${source_control_id}" \
+              --api-version 2022-03-01 \
+              --query properties.branch \
+              --output tsv 2>/dev/null || true)"
+
+            echo "::warning::Detaching Deployment Center source binding from ${app_name}: ${repo_url:-unknown}@${branch:-unknown}. Update Terraform deployment_method to avoid drift."
+            az webapp deployment source delete \
+              --resource-group "${resource_group}" \
+              --name "${app_name}"
+
+            for attempt in 1 2 3 4 5; do
+              repo_url="$(az resource show \
+                --ids "${source_control_id}" \
+                --api-version 2022-03-01 \
+                --query properties.repoUrl \
+                --output tsv 2>/dev/null || true)"
+              if [ -z "${repo_url}" ]; then
+                echo "Deployment Center source binding detached from ${app_name}."
+                return 0
+              fi
+              sleep 2
+            done
+
+            echo "Deployment Center source binding is still present on ${app_name} after deletion." >&2
+            return 1
+          }
+
+          detach_deployment_center "${WEBAPP_NAME_PRIMARY}"
+          detach_deployment_center "${WEBAPP_NAME_SECONDARY}"
+
+      - name: Download package artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: webapp-package-${{ github.run_id }}
+          path: ${{ github.workspace }}/artifact
+
+      - name: Deploy published ZIP packages
+        shell: bash
+        env:
+          PACKAGE_PATH: ${{ github.workspace }}/artifact/app.zip
+        run: |
+          set -euo pipefail
+
+          test_scm_connectivity() {
+            local host_name="$1"
+
+            echo "Starting SCM connectivity preflight for ${host_name}..."
+
+            if getent ahosts "${host_name}" > /tmp/scm_dns.txt 2>/tmp/scm_dns_err.txt; then
+              awk '!seen[$1 FS $2]++ { printf("SCM resolved address [%s]: %s\n", $2, $1) }' /tmp/scm_dns.txt
+            else
+              cat /tmp/scm_dns_err.txt || true
+              if command -v nslookup >/dev/null 2>&1; then
+                nslookup "${host_name}" || true
+              fi
+              echo "Failed to resolve ${host_name} from the GitHub runner." >&2
+              exit 1
+            fi
+
+            echo "SCM TCP probe: testing ${host_name}:443"
+            if ! timeout 10 bash -c "cat < /dev/null > /dev/tcp/${host_name}/443" 2>/tmp/scm_tcp_err.txt; then
+              cat /tmp/scm_tcp_err.txt || true
+              echo "Failed to reach https://${host_name} from the GitHub runner." >&2
+              exit 1
+            fi
+          }
+
+          deploy_target() {
+            local app_name="$1"
+
+            if [ -z "${app_name}" ]; then
+              echo "Deployment target is blank. Skipping."
+              return 0
+            fi
+
+            local app_id
+            local subscription_id
+            local resource_group
+            local scm_host
+            local app_os
+
+            app_id="$(az resource list --name "${app_name}" --resource-type "Microsoft.Web/sites" --query "[0].id" --output tsv)"
+            if [ -z "${app_id}" ]; then
+              echo "App Service '${app_name}' was not found. Skipping deployment."
+              return 0
+            fi
+
+            subscription_id="$(echo "${app_id}" | cut -d/ -f3)"
+            resource_group="$(echo "${app_id}" | cut -d/ -f5)"
+            scm_host="${app_name}.scm.azurewebsites.net"
+
+            echo "Deploying ZIP package with build automation to ${app_name}..."
+            az account set --subscription "${subscription_id}"
+            test_scm_connectivity "${scm_host}"
+
+            app_os="$(az webapp show --resource-group "${resource_group}" --name "${app_name}" --query reserved --output tsv | tr '[:upper:]' '[:lower:]')"
+            echo "Detected reserved value for ${app_name}: ${app_os}"
+
+            if [ "${app_os}" = "true" ]; then
+              az webapp config set \
+                --resource-group "${resource_group}" \
+                --name "${app_name}" \
+                --linux-fx-version "${LINUX_NODE_RUNTIME_STACK}" \
+                --startup-file "npm start"
+
+              az webapp config appsettings delete \
+                --resource-group "${resource_group}" \
+                --name "${app_name}" \
+                --setting-names WEBSITE_NODE_DEFAULT_VERSION WEBSITE_RUN_FROM_PACKAGE || true
+            elif [ "${app_os}" = "false" ]; then
+              az webapp config appsettings delete \
+                --resource-group "${resource_group}" \
+                --name "${app_name}" \
+                --setting-names WEBSITE_RUN_FROM_PACKAGE || true
+
+              az webapp config appsettings set \
+                --resource-group "${resource_group}" \
+                --name "${app_name}" \
+                --settings WEBSITE_NODE_DEFAULT_VERSION="${WINDOWS_NODE_VERSION}"
+            else
+              echo "Unexpected reserved value '${app_os}' for '${app_name}'. Continuing with neutral ZIP deployment." >&2
+            fi
+
+            az webapp config appsettings set \
+              --resource-group "${resource_group}" \
+              --name "${app_name}" \
+              --settings \
+                SCM_DO_BUILD_DURING_DEPLOYMENT=true \
+                ENABLE_ORYX_BUILD=true \
+                APP_SERVICE_NAME="${app_name}" \
+                APP_SERVICE_SUBSCRIPTION_ID="${subscription_id}" \
+                APP_SERVICE_RESOURCE_GROUP="${resource_group}"
+
+            az webapp deploy \
+              --resource-group "${resource_group}" \
+              --name "${app_name}" \
+              --src-path "${PACKAGE_PATH}" \
+              --type zip \
+              --restart true \
+              --track-status false
+          }
+
+          deploy_target "${WEBAPP_NAME_PRIMARY}"
+          deploy_target "${WEBAPP_NAME_SECONDARY}"
+
+      - name: Remove temporary SCM allow rule
+        if: always() && steps.runner_ip.outputs.address != ''
+        shell: bash
+        run: |
+          set -u
+
+          remove_scm_access() {
+            local app_name="$1"
+
+            if [ -z "${app_name}" ]; then
+              return 0
+            fi
+
+            local app_id
+            local subscription_id
+            local resource_group
+
+            app_id="$(az resource list --name "${app_name}" --resource-type "Microsoft.Web/sites" --query "[0].id" --output tsv 2>/dev/null || true)"
+            if [ -z "${app_id}" ]; then
+              echo "::warning::App Service '${app_name}' was not found during SCM rule cleanup."
+              return 0
+            fi
+
+            subscription_id="$(echo "${app_id}" | cut -d/ -f3)"
+            resource_group="$(echo "${app_id}" | cut -d/ -f5)"
+            az account set --subscription "${subscription_id}"
+
+            echo "Removing temporary SCM rule ${SCM_ALLOW_RULE_NAME} from ${app_name}."
+            if ! az webapp config access-restriction remove \
+              --resource-group "${resource_group}" \
+              --name "${app_name}" \
+              --rule-name "${SCM_ALLOW_RULE_NAME}" \
+              --scm-site true; then
+              echo "::warning::Failed to remove SCM rule ${SCM_ALLOW_RULE_NAME} from ${app_name}."
+            fi
+          }
+
+          remove_scm_access "${WEBAPP_NAME_PRIMARY}"
+          remove_scm_access "${WEBAPP_NAME_SECONDARY}"
+
+  publish-stage-repo:
+    name: Publish Github Repo
+    needs:
+      - build-package
+      - create-git-tag
+      - pre-publish-check
+    if: github.event_name != 'pull_request' && needs.build-package.result == 'success' && needs.pre-publish-check.outputs.should_publish_stage_repo == 'true' && (needs.create-git-tag.result == 'success' || needs.create-git-tag.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Publish clean snapshot to stage repo
+        env:
+          STAGE_REPO_URL: ${{ vars.STAGE_REPO_URL }}
+          STAGE_REPO_TOKEN: ${{ secrets.STAGE_REPO_TOKEN }}
+          SOURCE_BRANCH: ${{ needs.build-package.outputs.branch_name }}
+          SOURCE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.create-git-tag.outputs.release_tag }}
+          RELEASE_NOTES: ${{ needs.create-git-tag.outputs.release_notes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+
+          rsync -a \
+            --exclude='.git' \
+            "${GITHUB_WORKSPACE}/" "${workdir}/repo/"
+
+          cd "${workdir}/repo"
+
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${SOURCE_BRANCH}"
+          git add .
+          git commit -m "Stage snapshot from ${SOURCE_BRANCH}@${SOURCE_SHA}"
+
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            release_notes="${RELEASE_NOTES:-}"
+            if [[ -z "${release_notes}" ]]; then
+              release_notes="- ${SOURCE_SHA}"
+            fi
+
+            tag_message="$(mktemp)"
+            {
+              echo "Release ${RELEASE_TAG} snapshot"
+              echo
+              echo "Source: ${SOURCE_BRANCH}@${SOURCE_SHA}"
+              echo
+              echo "Changes:"
+              printf '%s\n' "${release_notes}"
+            } > "${tag_message}"
+
+            git tag -a "${RELEASE_TAG}" -F "${tag_message}"
+          fi
+
+          target_repo="${STAGE_REPO_URL#https://}"
+          git remote add origin "https://x-access-token:${STAGE_REPO_TOKEN}@${target_repo}.git"
+          git push --force origin "${SOURCE_BRANCH}"
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+              echo "Stage repo already has tag ${RELEASE_TAG}; leaving it unchanged."
+            else
+              git push origin "refs/tags/${RELEASE_TAG}"
+            fi
+          fi
+
+  publish-ado-repo:
+    name: Publish ADO Repo
+    needs:
+      - build-package
+      - create-git-tag
+      - pre-publish-check
+    if: github.event_name != 'pull_request' && needs.build-package.result == 'success' && needs.pre-publish-check.outputs.should_publish_ado_repo == 'true' && (needs.create-git-tag.result == 'success' || needs.create-git-tag.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Publish clean snapshot to Azure DevOps repo
+        env:
+          ADO_REPO_URL: ${{ vars.ADO_REPO_URL }}
+          ADO_REPO_PAT: ${{ secrets.ADO_REPO_PAT }}
+          SOURCE_BRANCH: ${{ needs.build-package.outputs.branch_name }}
+          SOURCE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.create-git-tag.outputs.release_tag }}
+          RELEASE_NOTES: ${{ needs.create-git-tag.outputs.release_notes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+
+          rsync -a \
+            --exclude='.git' \
+            "${GITHUB_WORKSPACE}/" "${workdir}/repo/"
+
+          cd "${workdir}/repo"
+
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${SOURCE_BRANCH}"
+          git add .
+          git commit -m "ADO snapshot from ${SOURCE_BRANCH}@${SOURCE_SHA}"
+
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            release_notes="${RELEASE_NOTES:-}"
+            if [[ -z "${release_notes}" ]]; then
+              release_notes="- ${SOURCE_SHA}"
+            fi
+
+            tag_message="$(mktemp)"
+            {
+              echo "Release ${RELEASE_TAG} snapshot"
+              echo
+              echo "Source: ${SOURCE_BRANCH}@${SOURCE_SHA}"
+              echo
+              echo "Changes:"
+              printf '%s\n' "${release_notes}"
+            } > "${tag_message}"
+
+            git tag -a "${RELEASE_TAG}" -F "${tag_message}"
+          fi
+
+          target_repo="${ADO_REPO_URL#https://}"
+          git remote add origin "https://ado:${ADO_REPO_PAT}@${target_repo}"
+          git push --force origin "${SOURCE_BRANCH}"
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            git push --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          fi
