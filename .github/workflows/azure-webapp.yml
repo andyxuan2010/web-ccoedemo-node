@@ -128,7 +128,7 @@ jobs:
           zip -r "${PACKAGE_PATH}" .
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: webapp-package-${{ github.run_id }}
           path: ${{ env.PACKAGE_PATH }}
