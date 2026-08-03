@@ -1,0 +1,174 @@
+parameters:
+  - name: deploymentEnvironment
+    displayName: Deployment environment
+    type: string
+    default: dev
+    values:
+      - sbx
+      - dev
+      - prod
+  - name: webAppNamePrimary
+    displayName: Primary App Service override (required for prod)
+    type: string
+    default: ""
+  - name: webAppNameSecondary
+    type: string
+    default: ""
+  - name: webAppNameThird
+    type: string
+    default: ""
+
+trigger:
+  branches:
+    include:
+      #- main
+      - none
+
+
+pr:
+  branches:
+    include:
+      #- main
+      - none
+
+
+resources:
+  repositories:
+    - repository: tf_tpl
+      type: git
+      name: IaC/template
+      ref: refs/heads/main
+
+pool:
+  name: "IaCRunner"
+  demands:
+    - Agent.OS -equals Linux
+
+variables:
+  - name: env
+    value: ${{ parameters.deploymentEnvironment }}
+  - name: subscription
+    ${{ if eq(parameters.deploymentEnvironment, 'prod') }}:
+      value: "prod"
+    ${{ if eq(parameters.deploymentEnvironment, 'dev') }}:
+      value: "nonprod"
+    ${{ if eq(parameters.deploymentEnvironment, 'sbx') }}:
+      value: "sbx"
+  - name: azureServiceConnection
+    value: "sc-ccoe-iac-devops-${{ variables.subscription }}"
+  - name: webAppNamePrimary
+    ${{ if ne(parameters.webAppNamePrimary, '') }}:
+      value: ${{ parameters.webAppNamePrimary }}
+    ${{ elseif eq(parameters.deploymentEnvironment, 'dev') }}:
+      value: "web-platform-eus-dev-node"
+    ${{ elseif eq(parameters.deploymentEnvironment, 'sbx') }}:
+      value: "web-platform-cc-sbx-node"
+    ${{ else }}:
+      value: ""
+  - name: webAppNameSecondary
+    value: ${{ parameters.webAppNameSecondary }}
+  - name: webAppNameThird
+    value: ${{ parameters.webAppNameThird }}
+  - name: packagePath
+    value: "$(Build.ArtifactStagingDirectory)/app.zip"
+  - name: packageRoot
+    value: "$(Build.ArtifactStagingDirectory)/package"
+  - name: nodeVersion
+    value: "24.x"
+  - name: windowsNodeVersion
+    value: "~24"
+  - name: linuxNodeRuntimeStack
+    value: "NODE|24-lts"
+
+stages:
+  - stage: Build
+    displayName: Build
+    jobs:
+      - job: Build
+        displayName: Build self-contained package
+        steps:
+          - template: templates/shared-runner-hygiene.yml@tf_tpl
+            parameters:
+              configureNodeCache: true
+              runPostJobCleanup: false
+
+          - checkout: self
+            clean: true
+            persistCredentials: false
+
+          - task: UseNode@1
+            displayName: Use Node 24
+            inputs:
+              version: "$(nodeVersion)"
+
+          - script: |
+              set -euo pipefail
+              npm ci
+            displayName: Install dependencies
+
+          - script: |
+              set -euo pipefail
+              npm run check
+            displayName: Lint, test, and audit
+
+          - script: |
+              set -euo pipefail
+
+              PACKAGE_ROOT="$(packageRoot)"
+
+              rm -rf "${PACKAGE_ROOT}"
+              mkdir -p "${PACKAGE_ROOT}"
+
+              cp app.js "${PACKAGE_ROOT}/"
+              cp runtime-config.js "${PACKAGE_ROOT}/"
+              cp package.json "${PACKAGE_ROOT}/"
+              cp package-lock.json "${PACKAGE_ROOT}/"
+              cp web.config "${PACKAGE_ROOT}/"
+              cp -R views "${PACKAGE_ROOT}/views"
+              cp -R static "${PACKAGE_ROOT}/static"
+              cp -R node_modules "${PACKAGE_ROOT}/node_modules"
+            displayName: Build package contents
+
+          - task: ArchiveFiles@2
+            displayName: Archive application package
+            inputs:
+              rootFolderOrFile: "$(packageRoot)"
+              includeRootFolder: false
+              archiveType: zip
+              archiveFile: "$(packagePath)"
+              replaceExistingArchive: true
+
+          - script: |
+              set -euo pipefail
+              for required_file in app.js runtime-config.js package.json package-lock.json web.config; do
+                unzip -l "$(packagePath)" | awk '{print $4}' | grep -Fx "${required_file}" > /dev/null
+              done
+            displayName: Validate required package files
+
+          - publish: "$(packagePath)"
+            displayName: Publish artifact
+            artifact: drop
+
+          - template: templates/shared-runner-hygiene.yml@tf_tpl
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false
+
+  - template: templates/webapp-deploy-stage.yml@tf_tpl
+    parameters:
+      stageName: Deploy
+      displayName: Deploy
+      dependsOn: Build
+      azureServiceConnection: $(azureServiceConnection)
+      environmentName: ${{ format('webapp-node-{0}', parameters.deploymentEnvironment) }}
+      webAppNamePrimary: $(webAppNamePrimary)
+      webAppNameSecondary: $(webAppNameSecondary)
+      webAppNameThird: $(webAppNameThird)
+      stack: node
+      linuxRuntimeStack: $(linuxNodeRuntimeStack)
+      # Do not depend on the App Service launch working directory.
+      startupCommand: cd /home/site/wwwroot && npm start
+      windowsRuntimeVersion: $(windowsNodeVersion)
+      deploymentMode: runFromPackage
+      healthPath: /healthz
