@@ -1,0 +1,29 @@
+{
+  "name": "web-ccoedemo-dev-node-601",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AAD SSO demo site in Node.js for Azure App Service",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "lint": "eslint .",
+    "test": "node --test",
+    "check": "npm run lint && npm test && npm audit --omit=dev --audit-level=high"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^5.4.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.1",
+    "express-session": "^1.18.1",
+    "helmet": "^8.3.0",
+    "nunjucks": "^3.2.4"
+  },
+  "devDependencies": {
+    "eslint": "^10.8.0",
+    "supertest": "^7.2.2"
+  }
+}
