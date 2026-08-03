@@ -1,0 +1,131 @@
+# Deployment Methods
+
+This repo currently implements three repo-managed delivery paths:
+
+1. `azure-pipelines.yml`
+2. `.github/workflows/azure-webapp.yml`
+3. `run_from_package.yml`
+
+Azure App Service also supports other delivery models such as `Deployment Center` and `ACR/custom container`, but those are platform options only for this repo today.
+
+## Repo-Implemented Methods
+
+| Method | Implemented in repo | Trigger model | Dependency install location | Runtime content | Primary use |
+| --- | --- | --- | --- | --- | --- |
+| `azure-pipelines.yml` | Yes | `main` CI/CD and PR validation | App Service during deploy via Oryx | ZIP without `node_modules` | Default Azure DevOps path |
+| `.github/workflows/azure-webapp.yml` | Yes | `main` pushes, PRs, and optional manual dispatch | App Service during deploy via Oryx | ZIP without `node_modules` | Default GitHub Actions path |
+| `run_from_package.yml` | Yes | Manual only (`trigger: none`, `pr: none`) | Pipeline runner before deploy | ZIP with `node_modules` mounted read-only | Immutable package testing |
+| `Deployment Center` | No | Portal-managed | App Service | Branch contents | Not repo-managed here |
+| `ACR/custom container` | No | Pipeline or image-triggered | Image build stage | OCI image | Not repo-managed here |
+
+## What The Repo Actually Ships
+
+### 1. `azure-pipelines.yml`
+
+This is the main Azure DevOps deployment path.
+
+How it works:
+
+1. Uses the Microsoft-hosted `Azure Pipelines` pool on `ubuntu-latest`.
+2. Imports shared hygiene steps from `IaC/template` through the `templates` alias.
+3. Runs on `main` and pull requests targeting `main`.
+4. Installs Node `24.x`, runs `npm ci`, then runs lint, HTTP tests, and the production dependency audit.
+5. Stages the runtime payload into `app.zip`.
+6. Publishes the ZIP as artifact `drop`.
+7. Defines `DeploySandbox` and `DeployDev` using `azure-pipelines/deploy-stage.yml` for shared deploy logic.
+
+Deploy-stage behavior:
+
+1. Checks the primary target and optional secondary target.
+2. Downloads the ZIP only when at least one target is deployable.
+3. Runs SCM/Kudu DNS and TCP `443` checks before deployment.
+4. Detects Windows versus Linux dynamically.
+5. Configures Linux with `NODE|24-lts` and `cd /home/site/wwwroot && npm start` so startup does not depend on the launch working directory.
+6. Configures Windows with `WEBSITE_NODE_DEFAULT_VERSION=~24`.
+7. Removes `WEBSITE_RUN_FROM_PACKAGE`.
+8. Enables `SCM_DO_BUILD_DURING_DEPLOYMENT=true` and `ENABLE_ORYX_BUILD=true`.
+9. Deploys with `az webapp deploy --type zip`.
+
+Stage-specific targets:
+
+- `DeploySandbox`
+  - service connection: `sc-platform-sbx`
+  - primary app: `web-platform-cc-sbx-node`
+- `DeployDev`
+  - service connection: `sc-platform-dev`
+  - primary app: `web-platform-eus-dev-node`
+- Shared default
+  - secondary app: blank unless explicitly set through `webAppNameSecondary`
+
+Operational characteristics:
+
+- Small artifact because `node_modules` is not shipped.
+- Azure DevOps flow is aligned with the sibling `landingzone` sequencing model.
+- Uses compile-time service connection values so pipeline validation succeeds.
+- The checked-in deploy template supports one primary and one optional secondary App Service target per stage.
+
+### 2. `.github/workflows/azure-webapp.yml`
+
+This is the main GitHub Actions deployment path.
+
+How it works:
+
+1. Runs on `main`, pull requests targeting `main`, and optional manual dispatch.
+2. Uses repository variable `DEPLOY_ENV` to select a GitHub Environment; deployment is not mapped from the source branch.
+3. Builds one ZIP artifact on Ubuntu with Node `24.x`.
+4. Creates one canonical annotated semantic version tag on non-PR success.
+5. Runs optional mirror-publish prechecks for GitHub and Azure DevOps snapshot publishing.
+6. Validates and uses environment-scoped `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, and `ARM_SUBSCRIPTION_ID` for service-principal login; OIDC is not currently used.
+7. Resolves `WEBAPP_NAME_PRIMARY` and optional `WEBAPP_NAME_SECONDARY` from the selected GitHub Environment.
+8. Discovers the GitHub-hosted runner's public IPv4 address and temporarily adds an SCM-only `/32` access rule for each target.
+9. Checks each target for a Deployment Center source binding, detaches any binding found, and verifies removal before direct ZIP deployment.
+10. Configures the Node runtime and Oryx remote-build settings, checks SCM/Kudu connectivity, and deploys with `az webapp deploy --type zip`.
+11. Removes the run-specific SCM rules under `if: always()`, including when deployment fails.
+12. Publishes clean snapshots and the canonical tag to configured staging GitHub and Azure DevOps repositories.
+13. Excludes the entire `.github/` directory from the GitHub staging snapshot so staging cannot run source workflows or Dependabot.
+
+Operational characteristics:
+
+- Keeps GitHub and Azure DevOps delivery models closely aligned.
+- Uses one selected GitHub Environment as the source of deployment credentials and App Service names.
+- Supports optional repo snapshot publishing to GitHub and Azure DevOps mirrors.
+- Uses `scripts/create-release-tag.sh` as the canonical tag implementation.
+- Requires the service principal to manage App Service access restrictions and `Microsoft.Web/sites/sourcecontrols/*`.
+- A force-cancelled runner can leave a stale `github-actions-*` SCM rule.
+- Detaching Deployment Center creates Terraform drift when the landing-zone configuration still declares `deployment_method = "deployment_center"`; configure a ZIP-based method to make GitHub Actions the durable deployment owner.
+
+Required GitHub configuration:
+
+- Repository variable: `DEPLOY_ENV`
+- Selected environment variable: `WEBAPP_NAME_PRIMARY`
+- Optional selected environment variable: `WEBAPP_NAME_SECONDARY`
+- Selected environment secrets: `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID`
+- Mirror repository variables: `STAGE_REPO_URL`, `ADO_REPO_URL`
+- Mirror repository secrets: `STAGE_REPO_TOKEN`, `ADO_REPO_PAT`
+
+### 3. `run_from_package.yml`
+
+This is the alternate package-mounted deployment path. It is present in the repo, but intentionally disabled for automatic CI/CD.
+
+How it works:
+
+1. Uses a runner-built artifact that includes `node_modules`.
+2. Sets `WEBSITE_RUN_FROM_PACKAGE=1`.
+3. Keeps a more immutable package model than the main ZIP-deploy pipelines.
+
+Operational characteristics:
+
+- Produces a larger artifact because `node_modules` is included.
+- Supports an immutable package story more cleanly than the primary pipelines.
+- Still depends on SCM/Kudu reachability because deployment goes through App Service tooling.
+
+## Recommendation For This Repo
+
+Recommended defaults:
+
+- `azure-pipelines.yml` when Azure DevOps is the orchestrator
+- `.github/workflows/azure-webapp.yml` when GitHub is the orchestrator
+
+Use `run_from_package.yml` when you specifically want to validate or promote a sealed ZIP artifact with `node_modules` already included.
+
+Do not treat `Deployment Center` or `ACR/custom container` as active repo-supported deployment methods unless this repository later adds the needed configuration and assets.
