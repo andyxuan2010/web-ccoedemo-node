@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}AAD SSO Demo{% endblock %}</title>
+    <script nonce="{{ csp_nonce }}">
+        (function () {
+            const savedTheme = localStorage.getItem("identity-demo-theme");
+            document.documentElement.dataset.theme = savedTheme === "classic" ? "classic" : "cloud";
+            document.documentElement.lang = localStorage.getItem("identity-demo-language") === "fr" ? "fr" : "en";
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ static_url('css/shared-ui.css', cache_token) }}">
+</head>
+<body>
+    <div class="scroll-progress" id="scrollProgress"></div>
+    <div class="firework-layer" id="fireworkLayer"></div>
+    <header class="site-banner">
+        <a class="brand" href="{{ path_for('index') }}" aria-label="Identity Demo home">
+            <span class="brand-mark">ID</span>
+            <span class="brand-copy"><strong data-i18n="brand.title">Identity Demo</strong><small data-i18n="brand.subtitle">Microsoft Entra ID</small></span>
+        </a>
+        <div class="banner-actions">
+            <nav class="banner-primary-actions" aria-label="Application actions">
+                <a class="banner-link" href="{{ path_for('index') }}" data-i18n="nav.home">Home</a>
+                <button class="banner-link" type="button" onclick="refreshLatest()" data-i18n="nav.refresh">Refresh Latest</button>
+                {% if is_signed_in %}
+                <a class="banner-link" href="{{ app_service_portal_url }}" target="_blank" rel="noopener noreferrer" data-i18n="nav.appService">App Service</a>
+                <a class="banner-link" href="{{ app_registration_portal_url }}" target="_blank" rel="noopener noreferrer" data-i18n="nav.appRegistration">App Registration</a>
+                {% else %}
+                <a class="banner-link disabled" href="#" aria-disabled="true" tabindex="-1" data-i18n="nav.appService">App Service</a>
+                <a class="banner-link disabled" href="#" aria-disabled="true" tabindex="-1" data-i18n="nav.appRegistration">App Registration</a>
+                {% endif %}
+            </nav>
+            <button class="theme-switch" id="themeSwitch" type="button" aria-pressed="false"><span class="theme-switch-icon" aria-hidden="true">◐</span><span class="theme-switch-label">Cloud</span></button>
+            <div class="language-switch" role="group" aria-label="Language">
+                <button class="language-option active" type="button" data-language="en" aria-pressed="true">EN</button>
+                <span aria-hidden="true">/</span>
+                <button class="language-option" type="button" data-language="fr" aria-pressed="false">FR</button>
+            </div>
+        </div>
+    </header>
+    <main class="shell">
+        <div class="layout">
+            <section class="card">
+                {% block content %}{% endblock %}
+            </section>
+
+            <aside class="side-panel">
+                {% if is_signed_in %}
+                <div class="auth-row">
+                    <div class="auth-badge active">
+                        <span class="label">Active auth:</span>
+                        {% for mode in active_auth_modes %}
+                        <span class="mode-pill {{ mode|lower|replace(' ', '-') }}">{{ mode }}</span>
+                        {% endfor %}
+                    </div>
+                    <div class="auth-actions">
+                        {% if 'MSAL' in active_auth_modes %}
+                        <a class="button primary tiny" href="{{ path_for('logout_msal') }}">Sign out</a>
+                        {% endif %}
+                        {% if 'Easy Auth' in active_auth_modes %}
+                        <a class="button primary tiny" href="{{ path_for('logout_easyauth') }}">Sign out</a>
+                        {% endif %}
+                    </div>
+                </div>
+                {% else %}
+                <div class="auth-badge">
+                    <span class="label">Active auth:</span>
+                    <span class="mode-pill">Not signed in</span>
+                </div>
+                {% endif %}
+                <h2>Identity Demo</h2>
+                <p>Demo branding panel for identity mode validation</p>
+                <div class="live-metrics">
+                    <div class="metric-label">Local Time</div>
+                    <div class="metric-value" id="liveClock">--:--:--</div>
+                    <div class="metric-label" style="margin-top: 8px;">Date</div>
+                    <div class="metric-value" id="liveDate">---</div>
+                </div>
+                {% if runtime_info %}
+                <div class="panel-body">
+                    <ul class="meta-list runtime-list">
+                        {% for item in runtime_info %}
+                        <li>
+                            <strong>{{ item.label }}:</strong>
+                            <span>{{ item.value }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+                {% if is_signed_in %}
+                <div class="idle-timer">
+                    <div class="metric-label">Auto Sign-out</div>
+                    <div class="metric-value" id="idleCountdown">05:00</div>
+                </div>
+                {% endif %}
+                <details class="health-panel">
+                    <summary>Auth Health</summary>
+                    <div class="panel-body">
+                        <ul class="health-list">
+                            {% for item in auth_health %}
+                            <li class="health-row">
+                                <span class="status-dot {% if item.ok %}ok{% endif %}" aria-hidden="true"></span>
+                                <span>
+                                    <strong>{{ item.name }}</strong>
+                                    <span class="health-value"> - {{ item.value }}</span>
+                                </span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        <div class="health-summary">
+                            {% if auth_health_ready %}
+                            Core auth configuration is ready.
+                            {% else %}
+                            At least one auth setting still needs attention.
+                            {% endif %}
+                        </div>
+                    </div>
+                </details>
+                <details class="timeline-panel">
+                    <summary>Session Timeline</summary>
+                    <div class="panel-body">
+                        {% if session_timeline %}
+                        <ul class="timeline-list">
+                            {% for event in session_timeline %}
+                            <li class="timeline-item">
+                                <div class="timeline-event">{{ event.event }}</div>
+                                <div class="timeline-meta">
+                                    {% if event.mode %}
+                                    <span class="timeline-mode">{{ event.mode }}</span>
+                                    {% endif %}
+                                    <span class="timeline-at">{{ event.at }}</span>
+                                </div>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <p>No session events yet.</p>
+                        {% endif %}
+                    </div>
+                </details>
+            </aside>
+        </div>
+    </main>
+    <script nonce="{{ csp_nonce }}">
+        (function () {
+            const themeSwitch = document.getElementById("themeSwitch");
+            const languageOptions = Array.from(document.querySelectorAll("[data-language]"));
+            const translations = {
+                en: {
+                    "brand.title": "Identity Demo", "brand.subtitle": "Microsoft Entra ID", "nav.home": "Home", "nav.refresh": "Refresh Latest", "nav.appService": "App Service", "nav.appRegistration": "App Registration", "theme.classic": "Classic", "theme.cloud": "Cloud",
+                    "home.kicker": "Identity Demo", "home.title": "Node.js demo with MS Entra ID SSO", "home.intro": "This sample supports two sign-in modes on one site: Express/MSAL (app-managed) and App Service Easy Auth (platform-managed).",
+                    "home.msal.title": "MSAL Mode", "home.msal.copy": "The Express app uses MSAL to initiate sign-in, process the authorization response, acquire tokens, and maintain the authenticated user session in application code.", "home.easy.title": "Easy Auth Mode", "home.easy.copy": "Azure App Service authenticates the user before the request reaches Express, then provides verified identity details through platform-managed headers.",
+                    "home.choose": "Choose an authentication mode to start sign-in.", "home.signin.msal": "Sign in with MSAL", "home.signin.easy": "Sign in with Easy Auth"
+                },
+                fr: {
+                    "brand.title": "Démo d’identité", "brand.subtitle": "Microsoft Entra ID", "nav.home": "Accueil", "nav.refresh": "Actualiser", "nav.appService": "App Service", "nav.appRegistration": "Inscription d’application", "theme.classic": "Classique", "theme.cloud": "Nuage",
+                    "home.kicker": "Démo d’identité", "home.title": "Démo Node.js avec l’authentification unique Microsoft Entra ID", "home.intro": "Cet exemple offre deux modes de connexion sur un même site : Express/MSAL (géré par l’application) et App Service Easy Auth (géré par la plateforme).",
+                    "home.msal.title": "Mode MSAL", "home.msal.copy": "L’application Express utilise MSAL pour lancer la connexion, traiter la réponse d’autorisation, acquérir les jetons et maintenir la session authentifiée dans le code de l’application.", "home.easy.title": "Mode Easy Auth", "home.easy.copy": "Azure App Service authentifie l’utilisateur avant que la requête n’atteigne Express, puis fournit les données d’identité vérifiées au moyen d’en-têtes gérés par la plateforme.",
+                    "home.choose": "Choisissez un mode d’authentification pour vous connecter.", "home.signin.msal": "Se connecter avec MSAL", "home.signin.easy": "Se connecter avec Easy Auth"
+                }
+            };
+            let language = localStorage.getItem("identity-demo-language") === "fr" ? "fr" : "en";
+            const savedTheme = localStorage.getItem("identity-demo-theme");
+            document.documentElement.dataset.theme = savedTheme === "classic" ? "classic" : "cloud";
+
+            function translate(key) { return translations[language][key] || translations.en[key] || key; }
+            function updateThemeSwitch() {
+                const isCloud = document.documentElement.dataset.theme === "cloud";
+                themeSwitch.setAttribute("aria-pressed", String(isCloud));
+                themeSwitch.querySelector(".theme-switch-icon").textContent = isCloud ? "☼" : "◐";
+                themeSwitch.querySelector(".theme-switch-label").textContent = isCloud ? translate("theme.classic") : translate("theme.cloud");
+                themeSwitch.setAttribute("aria-label", isCloud ? translate("theme.classic") : translate("theme.cloud"));
+            }
+            function applyLanguage() {
+                document.documentElement.lang = language;
+                document.querySelectorAll("[data-i18n]").forEach(function (node) { node.textContent = translate(node.dataset.i18n); });
+                languageOptions.forEach(function (button) {
+                    const active = button.dataset.language === language;
+                    button.classList.toggle("active", active);
+                    button.setAttribute("aria-pressed", String(active));
+                });
+                updateThemeSwitch();
+            }
+            themeSwitch.addEventListener("click", function () {
+                const isCloud = document.documentElement.dataset.theme === "cloud";
+                if (isCloud) delete document.documentElement.dataset.theme;
+                else document.documentElement.dataset.theme = "cloud";
+                localStorage.setItem("identity-demo-theme", isCloud ? "classic" : "cloud");
+                updateThemeSwitch();
+            });
+            languageOptions.forEach(function (button) {
+                button.addEventListener("click", function () {
+                    language = button.dataset.language;
+                    localStorage.setItem("identity-demo-language", language);
+                    applyLanguage();
+                });
+            });
+            applyLanguage();
+
+            const progress = document.getElementById("scrollProgress");
+            const clock = document.getElementById("liveClock");
+            const date = document.getElementById("liveDate");
+            const fireworkLayer = document.getElementById("fireworkLayer");
+            const idleCountdown = document.getElementById("idleCountdown");
+            const idleLimitMs = 5 * 60 * 1000;
+            let idleDeadline = Date.now() + idleLimitMs;
+
+            function updateProgress() {
+                const top = document.documentElement.scrollTop || document.body.scrollTop;
+                const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+                const percent = height > 0 ? (top / height) * 100 : 0;
+                progress.style.width = percent + "%";
+            }
+
+            function updateTime() {
+                const now = new Date();
+                clock.textContent = now.toLocaleTimeString();
+                date.textContent = now.toLocaleDateString(undefined, {
+                    weekday: "short",
+                    year: "numeric",
+                    month: "short",
+                    day: "numeric",
+                });
+            }
+
+            updateProgress();
+            updateTime();
+            window.addEventListener("scroll", updateProgress, { passive: true });
+            setInterval(updateTime, 1000);
+
+            if (idleCountdown) {
+                function formatMs(ms) {
+                    const totalSec = Math.max(0, Math.ceil(ms / 1000));
+                    const m = Math.floor(totalSec / 60);
+                    const s = totalSec % 60;
+                    return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+                }
+
+                function resetIdleDeadline() {
+                    idleDeadline = Date.now() + idleLimitMs;
+                }
+
+                function tickIdle() {
+                    const remaining = idleDeadline - Date.now();
+                    idleCountdown.textContent = formatMs(remaining);
+                    if (remaining <= 0) {
+                        window.location.href = "{{ path_for('logout_all') }}";
+                    }
+                }
+
+                ["mousemove", "keydown", "click", "scroll", "touchstart"].forEach(function (evt) {
+                    window.addEventListener(evt, resetIdleDeadline, { passive: true });
+                });
+
+                tickIdle();
+                setInterval(tickIdle, 1000);
+            }
+
+            if (fireworkLayer) {
+                const palette = ["#3dd5f3", "#7ee081", "#ffd166", "#ff6f91", "#8d7dff", "#ff9f1c"];
+
+                function spawnFirework(clientX, clientY) {
+                    const ring = document.createElement("span");
+                    ring.className = "firework-ring";
+                    ring.style.left = (clientX - 7) + "px";
+                    ring.style.top = (clientY - 7) + "px";
+                    fireworkLayer.appendChild(ring);
+                    setTimeout(function () {
+                        ring.remove();
+                    }, 620);
+
+                    const sparks = 24;
+                    for (let i = 0; i < sparks; i += 1) {
+                        const spark = document.createElement("span");
+                        spark.className = "firework-spark";
+                        const angle = (Math.PI * 2 * i) / sparks;
+                        const distance = 40 + Math.random() * 88;
+                        spark.style.left = (clientX - 6) + "px";
+                        spark.style.top = (clientY - 6) + "px";
+                        spark.style.setProperty("--dx", Math.cos(angle) * distance + "px");
+                        spark.style.setProperty("--dy", Math.sin(angle) * distance + "px");
+                        spark.style.background = palette[Math.floor(Math.random() * palette.length)];
+                        fireworkLayer.appendChild(spark);
+                        setTimeout(function () {
+                            spark.remove();
+                        }, 1040);
+                    }
+                }
+
+                window.addEventListener("click", function (e) {
+                    if (e.button !== 0) {
+                        return;
+                    }
+                    spawnFirework(e.clientX, e.clientY);
+                }, { passive: true });
+            }
+
+            const claimsFilterInput = document.getElementById("claimsFilterInput");
+            const claimsList = document.getElementById("claimsList");
+            if (claimsFilterInput && claimsList) {
+                const claimKeys = claimsList.querySelectorAll("dt.claim-key");
+                claimsFilterInput.addEventListener("input", function () {
+                    const needle = claimsFilterInput.value.trim().toLowerCase();
+                    claimKeys.forEach(function (dt) {
+                        const dd = dt.nextElementSibling;
+                        if (!dd) {
+                            return;
+                        }
+                        const keyText = dt.textContent.toLowerCase();
+                        const valueNode = dd.querySelector(".claim-text");
+                        const valueText = valueNode ? valueNode.textContent.toLowerCase() : "";
+                        const matched = !needle || keyText.includes(needle) || valueText.includes(needle);
+                        dt.style.display = matched ? "" : "none";
+                        dd.style.display = matched ? "flex" : "none";
+                    });
+                });
+            }
+
+            document.addEventListener("click", function (e) {
+                const copyBtn = e.target.closest(".claim-copy-button");
+                if (!copyBtn) {
+                    return;
+                }
+                const text = copyBtn.getAttribute("data-claim-value") || "";
+                if (!navigator.clipboard) {
+                    return;
+                }
+                navigator.clipboard.writeText(text).then(function () {
+                    const previous = copyBtn.textContent;
+                    copyBtn.textContent = "Copied";
+                    setTimeout(function () {
+                        copyBtn.textContent = previous;
+                    }, 1000);
+                });
+            });
+        })();
+
+        async function refreshLatest() {
+            if ("caches" in window) {
+                try {
+                    const keys = await caches.keys();
+                    await Promise.all(keys.map((k) => caches.delete(k)));
+                } catch (e) {
+                    console.warn("Cache clear skipped:", e);
+                }
+            }
+            const u = new URL(window.location.href);
+            u.searchParams.set("cb", Date.now().toString());
+            window.location.href = u.toString();
+        }
+    </script>
+</body>
+</html>
