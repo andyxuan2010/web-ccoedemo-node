@@ -1,0 +1,131 @@
+name: $(Build.Repository.Name)
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+      - dev
+      - sbx
+
+pr:
+  branches:
+    include:
+      - main
+      - dev
+      - sbx
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: IaC/template
+      ref: refs/heads/main
+
+pool:
+  name: "Azure Pipelines"
+  vmImage: "ubuntu-latest"
+
+variables:
+  - name: env
+    ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+      value: "prod"
+    ${{ if eq(variables['Build.SourceBranchName'], 'dev') }}:
+      value: "dev"
+    ${{ if eq(variables['Build.SourceBranchName'], 'sbx') }}:
+      value: "sbx"
+  - name: webAppNameSecondary
+    value: ""
+  - name: packagePath
+    value: "$(Build.ArtifactStagingDirectory)/app.zip"
+  - name: packageRoot
+    value: "$(Build.ArtifactStagingDirectory)/package"
+  - name: nodeVersion
+    value: "24.x"
+  - name: windowsNodeVersion
+    value: "~24"
+  - name: linuxNodeRuntimeStack
+    value: "NODE|24-lts"
+
+stages:
+  - stage: Build
+    displayName: Build
+    jobs:
+      - job: Build
+        displayName: Build package
+        steps:
+          - template: templates/shared-runner-hygiene.yml@templates
+            parameters:
+              configureNodeCache: true
+              runPostJobCleanup: false
+
+          - checkout: self
+            clean: true
+            persistCredentials: false
+
+          - task: UseNode@1
+            displayName: Use Node 24
+            inputs:
+              version: "$(nodeVersion)"
+
+          - script: |
+              set -euo pipefail
+              npm ci
+            displayName: Install dependencies
+
+          - script: |
+              set -euo pipefail
+              npm run check
+            displayName: Lint, test, and audit
+
+          - script: |
+              set -euo pipefail
+              npm prune --omit=dev
+              npm run stage-package -- "$(packageRoot)"
+            displayName: Stage application files
+
+          - task: ArchiveFiles@2
+            displayName: Archive application
+            inputs:
+              rootFolderOrFile: "$(packageRoot)"
+              includeRootFolder: false
+              archiveType: zip
+              archiveFile: "$(packagePath)"
+              replaceExistingArchive: true
+
+          - script: |
+              set -euo pipefail
+              for required_file in app.js logger.js metrics.js runtime-config.js package.json package-lock.json web.config; do
+                unzip -l "$(packagePath)" | awk '{print $4}' | grep -Fx "${required_file}" > /dev/null
+              done
+            displayName: Validate required package files
+
+          - publish: "$(packagePath)"
+            displayName: Publish artifact
+            artifact: drop
+
+          - template: templates/shared-runner-hygiene.yml@templates
+            parameters:
+              runInitialization: false
+              runPreJobCleanup: false
+              runCachePrep: false
+
+  - template: azure-pipelines/deploy-stage.yml
+    parameters:
+      stageName: DeploySandbox
+      displayName: Deploy Sandbox
+      dependsOn: Build
+      azureServiceConnection: sc-platform-sbx
+      environmentName: webapp-node-sbx
+      webAppNamePrimary: web-platform-cc-sbx-node
+      sourceBranch: refs/heads/sbx
+
+  - template: azure-pipelines/deploy-stage.yml
+    parameters:
+      stageName: DeployDev
+      displayName: Deploy Dev
+      dependsOn: Build
+      azureServiceConnection: sc-platform-dev
+      environmentName: webapp-node-dev
+      webAppNamePrimary: web-platform-cc-dev-node
+      sourceBranch: refs/heads/dev
