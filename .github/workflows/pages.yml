@@ -1,0 +1,204 @@
+name: Publish documentation portal
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.md"
+      - "**/*.MD"
+      - "**/*.pdf"
+      - "**/*.vsdx"
+      - "index.html"
+      - "docs-manifest.json"
+      - ".nojekyll"
+      - "site/**"
+      - ".github/workflows/pages.yml"
+      - "scripts/Build-DocsSite.ps1"
+      - "scripts/Test-DocsSite.ps1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  documentation-portal-gate:
+    name: Documentation Portal Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    steps:
+      - name: Evaluate IS_ORIGIN
+        id: gate
+        shell: bash
+        env:
+          IS_ORIGIN: ${{ vars.IS_ORIGIN }}
+        run: |
+          set -euo pipefail
+          if [[ "${IS_ORIGIN,,}" == "true" ]]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+            echo "Documentation portal workflow is enabled for the origin repository."
+          else
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "Documentation portal workflow is disabled for the mirror repository."
+          fi
+
+  check-required-secrets-variables:
+    name: Check Required Secrets and Variables
+    needs: documentation-portal-gate
+    if: needs['documentation-portal-gate'].outputs.enabled == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate stage publishing inputs
+        shell: bash
+        env:
+          STAGE_REPOSITORY: ${{ vars.STAGE_REPOSITORY || 'andyxuan2010/web-ccoedemo-node' }}
+          STAGE_REPO_TOKEN: ${{ secrets.STAGE_REPO_TOKEN }}
+          CURRENT_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          stage_repository="${STAGE_REPOSITORY#https://github.com/}"
+          stage_repository="${stage_repository%.git}"
+          stage_repository="${stage_repository#/}"
+          stage_repository="${stage_repository%/}"
+
+          echo "::group::Required stage publishing inputs"
+          if [[ -n "${stage_repository}" ]]; then
+            echo "- variable STAGE_REPOSITORY: present"
+          else
+            echo "- variable STAGE_REPOSITORY: missing"
+          fi
+
+          if [[ "${CURRENT_REPOSITORY,,}" == "${stage_repository,,}" && -n "${stage_repository}" ]]; then
+            echo "- secret STAGE_REPO_TOKEN: not required when the current repository is the stage repository"
+          elif [[ -n "${STAGE_REPO_TOKEN}" ]]; then
+            echo "- secret STAGE_REPO_TOKEN: present"
+          else
+            echo "- secret STAGE_REPO_TOKEN: missing"
+          fi
+          echo "::endgroup::"
+
+          if [[ -z "${stage_repository}" ]]; then
+            echo "Missing required repository variable: STAGE_REPOSITORY" >&2
+            exit 1
+          fi
+
+          if [[ "${CURRENT_REPOSITORY,,}" != "${stage_repository,,}" && -z "${STAGE_REPO_TOKEN}" ]]; then
+            echo "Missing required secret: STAGE_REPO_TOKEN" >&2
+            exit 1
+          fi
+
+  publish-documentation:
+    needs:
+      - documentation-portal-gate
+      - check-required-secrets-variables
+    name: Publish Documentation Portal
+    if: needs['documentation-portal-gate'].outputs.enabled == 'true' && needs['check-required-secrets-variables'].result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+
+      - name: Build documentation site
+        shell: pwsh
+        run: ./scripts/Build-DocsSite.ps1
+
+      - name: Validate generated documentation site
+        shell: pwsh
+        run: ./scripts/Test-DocsSite.ps1
+
+      - name: Publish clean snapshot to public repository
+        env:
+          STAGE_REPOSITORY: ${{ vars.STAGE_REPOSITORY || 'andyxuan2010/web-ccoedemo-node' }}
+          STAGE_REPO_TOKEN: ${{ secrets.STAGE_REPO_TOKEN }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stage_repository="${STAGE_REPOSITORY#https://github.com/}"
+          stage_repository="${stage_repository%.git}"
+          stage_repository="${stage_repository#/}"
+          stage_repository="${stage_repository%/}"
+
+          if [[ -z "${stage_repository}" ]]; then
+            echo "Missing required repository variable: STAGE_REPOSITORY" >&2
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REPOSITORY,,}" == "${stage_repository,,}" ]]; then
+            echo "STAGE_REPOSITORY matches the current repository; skipping snapshot republish to prevent a loop."
+            exit 0
+          fi
+
+          if [[ -z "${STAGE_REPO_TOKEN}" ]]; then
+            echo "Missing required secret: STAGE_REPO_TOKEN" >&2
+            exit 1
+          fi
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+
+          rsync -a \
+            --exclude='.git' \
+            "${GITHUB_WORKSPACE}/" "${workdir}/repo/"
+
+          cd "${workdir}/repo"
+
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${SOURCE_BRANCH}"
+          git add .
+          git commit -m "Documentation snapshot from ${SOURCE_BRANCH}@${SOURCE_SHA}"
+
+          target_repo="github.com/${stage_repository}"
+          git remote add origin "https://x-access-token:${STAGE_REPO_TOKEN}@${target_repo}.git"
+          git push --force origin "${SOURCE_BRANCH}"
+
+  deploy-pages:
+    needs: documentation-portal-gate
+    name: Deploy GitHub Pages documentation portal
+    if: needs['documentation-portal-gate'].outputs.enabled == 'false' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - name: Build documentation site
+        shell: pwsh
+        run: ./scripts/Build-DocsSite.ps1
+      - name: Validate generated documentation site
+        shell: pwsh
+        run: ./scripts/Test-DocsSite.ps1
+      - name: Skip GitHub Pages deployment for private repository
+        if: github.event.repository.visibility != 'public'
+        run: echo "Repository is private; GitHub Pages configuration and deployment will be skipped."
+      - name: Configure GitHub Pages
+        if: github.event.repository.visibility == 'public'
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Upload site
+        if: github.event.repository.visibility == 'public'
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: _site
+      - name: Deploy
+        if: github.event.repository.visibility == 'public'
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

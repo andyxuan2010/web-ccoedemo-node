@@ -1,0 +1,12 @@
+{
+  "generatedAt": "2026-09-18T05:44:42Z",
+  "documents": [
+    "docs/ARCHITECTURE.md",
+    "docs/DEPLOYMENT_METHODS.md",
+    "docs/GIT-EXTRAHEADER-RUNNER-ISSUE.md",
+    "docs/SHARED-RUNNER-HYGIENE-STANDARD.md",
+    "docs/VALIDATION.md",
+    "README.md",
+    "SECURITY.md"
+  ]
+}
