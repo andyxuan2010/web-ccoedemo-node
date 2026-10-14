@@ -16,10 +16,10 @@
     "node": ">=24 <25"
   },
   "dependencies": {
-    "@azure/msal-node": "^5.4.3",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.6.1",
+    "@azure/msal-node": "^7.0.1",
+    "dotenv": "^18.0.7",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
     "express-session": "^1.18.1",
     "helmet": "^8.3.0",
     "nunjucks": "^3.2.4"
