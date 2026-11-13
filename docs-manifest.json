@@ -1,0 +1,12 @@
+{
+  "documents": [
+    "docs/10-architecture/architecture-overview.md",
+    "docs/30-deployment/deployment-methods.md",
+    "docs/40-pipelines/git-extraheader-runner-issue.md",
+    "docs/40-pipelines/shared-runner-hygiene.md",
+    "docs/70-validation/validation.md",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "generatedAt": "2026-09-19T16:35:49Z"
+}

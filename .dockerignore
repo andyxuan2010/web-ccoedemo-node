@@ -1,0 +1,16 @@
+.git
+.github
+.vscode
+.codex
+node_modules
+npm-debug.log*
+.env
+.env.*
+!.env.example
+_site
+azure-pipelines
+docs
+scripts
+test
+views/**/*.md
+static/**/*.md

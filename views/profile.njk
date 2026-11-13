@@ -1,0 +1,90 @@
+{% extends "base.njk" %}
+
+{% block title %}Profile | AAD SSO Demo{% endblock %}
+
+{% block content %}
+<div class="profile-head">
+    <span class="section-kicker">User Context</span>
+    <h1>Signed-in profile</h1>
+</div>
+<p><strong>Authentication mode:</strong> {{ auth_mode }}</p>
+
+{% if tenant_badges or role_badges %}
+<div class="identity-badges">
+    {% for tenant in tenant_badges %}
+    <span class="info-badge tenant-badge">Tenant: {{ tenant }}</span>
+    {% endfor %}
+    {% for role in role_badges %}
+    <span class="info-badge role-badge">{{ role }}</span>
+    {% endfor %}
+</div>
+{% endif %}
+
+<dl>
+    <dt>Name</dt>
+    <dd>{{ user.get("name", "n/a") }}</dd>
+
+    <dt>Username</dt>
+    <dd>{{ user.get("preferred_username", "n/a") }}</dd>
+
+    <dt>Tenant</dt>
+    <dd>{{ user.get("tid", "n/a") }}</dd>
+
+    <dt>Object ID</dt>
+    <dd>{{ user.get("oid", "n/a") }}</dd>
+
+    <dt>Email</dt>
+    <dd>{{ user.get("email") or user.get("preferred_username") or "n/a" }}</dd>
+
+    <dt>Authentication Type</dt>
+    {% set auth_type = user.get("authentication_type", "n/a") %}
+    <dd class="{% if 'aad' in (auth_type|lower) %}auth-type-alert{% endif %}">{{ auth_type }}</dd>
+
+</dl>
+
+<ul class="meta-list">
+    <li>
+        <strong>Display Name</strong>
+        {{ user.get("name", "n/a") }}
+    </li>
+    <li>
+        <strong>Principal</strong>
+        {{ user.get("preferred_username", "n/a") }}
+    </li>
+    <li>
+        <strong>Tenant</strong>
+        {{ user.get("tid", "n/a") }}
+    </li>
+    <li>
+        <strong>Object ID</strong>
+        {{ user.get("oid", "n/a") }}
+    </li>
+</ul>
+
+<details class="claims">
+    <summary>All Available Claims</summary>
+    {% if claim_items %}
+    <input id="claimsFilterInput" class="claims-filter-input" type="search" placeholder="Filter claims by name or value">
+    <dl id="claimsList">
+        {% for key, value in claim_items %}
+        <dt class="claim-key">{{ key }}</dt>
+        <dd class="claim-value">
+            <span class="claim-text">{{ value }}</span>
+            <button type="button" class="button secondary tiny claim-copy-button" data-claim-value="{{ value|e }}">Copy</button>
+        </dd>
+        {% endfor %}
+    </dl>
+    {% else %}
+    <p>No additional claims available for this authentication mode.</p>
+    {% endif %}
+</details>
+
+<div class="actions">
+    <a class="button secondary" href="{{ path_for('index') }}">Home</a>
+    {% if auth_mode == "Easy Auth" %}
+    <a class="button primary" href="{{ path_for('logout_easyauth') }}">Sign out</a>
+    {% else %}
+    <a class="button primary" href="{{ path_for('logout_msal') }}">Sign out</a>
+    {% endif %}
+</div>
+{% endblock %}
